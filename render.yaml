@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: sling-api
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node index.js
+    envVars:
+      - key: SLING_TOKEN
+        sync: false
+      - key: NODE_ENV
+        value: production
