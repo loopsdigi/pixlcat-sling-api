@@ -495,7 +495,7 @@ function getWeekKey(date) {
 app.get('/', (req, res) => {
   res.json({
     service: 'Pixlcat Sling API',
-    version: '2.0.0',
+    version: '2.1.0',
     status: 'running',
     endpoints: {
       'GET /users': 'List all employees',
@@ -1850,12 +1850,8 @@ app.post('/cron/check-conflicts', async (req, res) => {
 
     if (conflicts.conflictCount === 0) return res.json({ message: 'No conflicts found', alerted: false });
 
-    const slackText =
-      `🚨 *${conflicts.conflictCount} Schedule Conflict(s) Found*\nPeriod: ${conflicts.period}\n\n` +
-      conflicts.conflicts.map((c) => `• *${c.type}* — ${c.message}`).join('\n') +
-      '\n\n_Review and resolve before shifts begin._';
-
-    const slackResult = await postToSlack(slackText);
+    const { text, blocks } = formatConflictBlocks(conflicts.conflicts, conflicts.period);
+    const slackResult = await postToSlack(text, blocks);
     res.json({ message: `Alerted ${conflicts.conflictCount} conflicts`, alerted: !!slackResult, conflicts: conflicts.conflicts });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1967,6 +1963,332 @@ const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
 
 let _lastPostedDate = null;
 
+// ─── BLOCK KIT HELPERS ──────────────────────────────────────
+
+function fmtTimePT(isoStr) {
+  return new Date(isoStr).toLocaleTimeString('en-US', {
+    hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles',
+  });
+}
+
+function fmtDatePT(isoStr, opts = {}) {
+  return new Date(isoStr).toLocaleDateString('en-US', {
+    timeZone: 'America/Los_Angeles', weekday: 'long', month: 'short', day: 'numeric', ...opts,
+  });
+}
+
+function nowPT() {
+  return new Date().toLocaleString('en-US', {
+    timeZone: 'America/Los_Angeles', hour: 'numeric', minute: '2-digit', hour12: true,
+  });
+}
+
+// ─── 1. DAILY SCHEDULE BLOCKS ───────────────────────────────
+
+function formatScheduleBlocks(dateStr, shifts) {
+  const clementShifts = shifts.filter((s) => (s.location || '').includes('Clement'));
+  const ninthShifts = shifts.filter((s) => (s.location || '').includes('9th'));
+  const totalShifts = clementShifts.length + ninthShifts.length;
+
+  const fallback = `📋 Schedule for ${dateStr} — ${totalShifts} shifts`;
+
+  const blocks = [
+    { type: 'header', text: { type: 'plain_text', text: `📋 Schedule for ${dateStr}`, emoji: true } },
+  ];
+
+  // Clement location
+  if (clementShifts.length > 0) {
+    blocks.push({ type: 'divider' });
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: `*☕ Clement Pixlcat* — ${clementShifts.length} shift${clementShifts.length !== 1 ? 's' : ''}` },
+    });
+
+    clementShifts.sort((a, b) => a.start.localeCompare(b.start));
+    const fields = [];
+    for (const s of clementShifts) {
+      fields.push(
+        { type: 'mrkdwn', text: `*${s.employee}*\n${s.position || 'TBD'}` },
+        { type: 'mrkdwn', text: `${fmtTimePT(s.start)} – ${fmtTimePT(s.end)}` }
+      );
+    }
+    // Slack limits 10 fields per section block
+    for (let i = 0; i < fields.length; i += 10) {
+      blocks.push({ type: 'section', fields: fields.slice(i, i + 10) });
+    }
+  }
+
+  // 9th St location
+  if (ninthShifts.length > 0) {
+    blocks.push({ type: 'divider' });
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: `*🏠 9th St Pixlcat* — ${ninthShifts.length} shift${ninthShifts.length !== 1 ? 's' : ''}` },
+    });
+
+    ninthShifts.sort((a, b) => a.start.localeCompare(b.start));
+    const fields = [];
+    for (const s of ninthShifts) {
+      fields.push(
+        { type: 'mrkdwn', text: `*${s.employee}*\n${s.position || 'TBD'}` },
+        { type: 'mrkdwn', text: `${fmtTimePT(s.start)} – ${fmtTimePT(s.end)}` }
+      );
+    }
+    for (let i = 0; i < fields.length; i += 10) {
+      blocks.push({ type: 'section', fields: fields.slice(i, i + 10) });
+    }
+  }
+
+  if (totalShifts === 0) {
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '_No shifts scheduled._' } });
+  }
+
+  blocks.push({ type: 'divider' });
+  blocks.push({
+    type: 'context',
+    elements: [{ type: 'mrkdwn', text: `${totalShifts} total shifts · Posted ${nowPT()}` }],
+  });
+
+  return { text: fallback, blocks };
+}
+
+// ─── 2. WEEK SCHEDULE BLOCKS ────────────────────────────────
+
+function formatWeekBlocks(weekLabel, daySchedules) {
+  const totalShifts = daySchedules.reduce((sum, d) => sum + d.shifts.length, 0);
+  const fallback = `📅 ${weekLabel} — ${totalShifts} shifts across ${daySchedules.length} days`;
+
+  const blocks = [
+    { type: 'header', text: { type: 'plain_text', text: `📅 ${weekLabel}`, emoji: true } },
+    { type: 'section', text: { type: 'mrkdwn', text: `*${totalShifts} shifts* across ${daySchedules.length} days` } },
+  ];
+
+  for (const day of daySchedules) {
+    const { dateFormatted, shifts, isWeekend } = day;
+    const clementShifts = shifts.filter((s) => (s.location || '').includes('Clement'));
+    const ninthShifts = shifts.filter((s) => (s.location || '').includes('9th'));
+    const dayIcon = isWeekend ? '🔥' : '📌';
+
+    blocks.push({ type: 'divider' });
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: `${dayIcon} *${dateFormatted}* — ${shifts.length} shift${shifts.length !== 1 ? 's' : ''}` },
+    });
+
+    if (clementShifts.length > 0) {
+      clementShifts.sort((a, b) => a.start.localeCompare(b.start));
+      const lines = clementShifts.map((s) => `${s.employee} _(${s.position || 'TBD'})_ · ${fmtTimePT(s.start)}–${fmtTimePT(s.end)}`);
+      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*☕ Clement*\n${lines.join('\n')}` } });
+    }
+
+    if (ninthShifts.length > 0) {
+      ninthShifts.sort((a, b) => a.start.localeCompare(b.start));
+      const lines = ninthShifts.map((s) => `${s.employee} _(${s.position || 'TBD'})_ · ${fmtTimePT(s.start)}–${fmtTimePT(s.end)}`);
+      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*🏠 9th St*\n${lines.join('\n')}` } });
+    }
+
+    if (shifts.length === 0) {
+      blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '_No shifts scheduled_' }] });
+    }
+  }
+
+  blocks.push({ type: 'divider' });
+  blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `Posted ${nowPT()}` }] });
+
+  return { text: fallback, blocks };
+}
+
+// ─── 3. CONFLICT BLOCKS ─────────────────────────────────────
+
+function formatConflictBlocks(conflicts, period) {
+  if (!conflicts || conflicts.length === 0) {
+    return {
+      text: '✅ No scheduling conflicts found.',
+      blocks: [{ type: 'section', text: { type: 'mrkdwn', text: '✅ *No scheduling conflicts found.*' } }],
+    };
+  }
+
+  const fallback = `⚠️ ${conflicts.length} scheduling conflict${conflicts.length !== 1 ? 's' : ''} found`;
+
+  const blocks = [
+    { type: 'header', text: { type: 'plain_text', text: `⚠️ ${conflicts.length} Scheduling Conflict${conflicts.length !== 1 ? 's' : ''}`, emoji: true } },
+  ];
+
+  if (period) {
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*Period:* ${period}` } });
+  }
+
+  // Group by date if available
+  const byDate = {};
+  for (const c of conflicts) {
+    const dateKey = c.date || 'General';
+    if (!byDate[dateKey]) byDate[dateKey] = [];
+    byDate[dateKey].push(c);
+  }
+
+  for (const [date, items] of Object.entries(byDate)) {
+    blocks.push({ type: 'divider' });
+    if (date !== 'General') {
+      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*${date}*` } });
+    }
+
+    for (const c of items) {
+      const icon = c.type === 'LEAVE_CONFLICT' || c.type === 'leave_conflict' ? '🛑'
+        : c.type === 'AVAILABILITY_CONFLICT' || c.type === 'availability_conflict' ? '⚠️'
+        : c.type === 'CROSS_LOCATION' || c.type === 'cross_location' ? '🔄'
+        : c.type === 'OVERTIME_RISK' || c.type === 'overtime_risk' ? '⏰'
+        : c.type === 'CONSECUTIVE_DAYS' || c.type === 'consecutive_days' ? '📆'
+        : '❓';
+
+      blocks.push({
+        type: 'section',
+        text: { type: 'mrkdwn', text: `${icon} *${c.type}* — ${c.message}` },
+      });
+    }
+  }
+
+  blocks.push({ type: 'divider' });
+  blocks.push({
+    type: 'context',
+    elements: [{ type: 'mrkdwn', text: `Checked ${nowPT()} · Fix conflicts before shifts begin` }],
+  });
+
+  return { text: fallback, blocks };
+}
+
+// ─── 4. HOURS BLOCKS ────────────────────────────────────────
+
+function formatHoursBlocks(data) {
+  const name = data.employee || data.name || 'Employee';
+  const total = (data.totalHours || 0).toFixed(1);
+  const remaining = data.remainingBeforeOT != null ? parseFloat(data.remainingBeforeOT).toFixed(1) : (40 - parseFloat(total)).toFixed(1);
+  const clement = (data.clementHours || 0).toFixed(1);
+  const ninth = (data.ninthStHours || data.ninthHours || 0).toFixed(1);
+
+  const fallback = `⏱️ ${name}: ${total}h this week (${remaining}h remaining)`;
+
+  const blocks = [
+    { type: 'header', text: { type: 'plain_text', text: `⏱️ Hours: ${name}`, emoji: true } },
+    {
+      type: 'section',
+      fields: [
+        { type: 'mrkdwn', text: `*Total Hours*\n${total}h` },
+        { type: 'mrkdwn', text: `*Remaining*\n${remaining}h` },
+        { type: 'mrkdwn', text: `*☕ Clement*\n${clement}h` },
+        { type: 'mrkdwn', text: `*🏠 9th St*\n${ninth}h` },
+      ],
+    },
+  ];
+
+  // Overtime warning
+  if (parseFloat(total) > 35) {
+    blocks.push({
+      type: 'context',
+      elements: [{ type: 'mrkdwn', text: `⚠️ *Approaching 40h limit* — ${remaining}h remaining before overtime` }],
+    });
+  }
+
+  blocks.push({ type: 'divider' });
+  blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `Updated ${nowPT()}` }] });
+
+  return { text: fallback, blocks };
+}
+
+// ─── 5. WHO'S WORKING BLOCKS ────────────────────────────────
+
+function formatWhosWorkingBlocks(dateFormatted, shifts) {
+  const clementShifts = shifts.filter((s) => (s.location || '').includes('Clement'));
+  const ninthShifts = shifts.filter((s) => (s.location || '').includes('9th'));
+  const working = shifts.filter((s) => s.employeeId);
+
+  const fallback = `Working ${dateFormatted}: ${working.length} employees`;
+
+  const blocks = [
+    { type: 'header', text: { type: 'plain_text', text: `👥 Working ${dateFormatted}`, emoji: true } },
+  ];
+
+  if (clementShifts.length > 0) {
+    blocks.push({ type: 'divider' });
+    const lines = clementShifts
+      .sort((a, b) => a.start.localeCompare(b.start))
+      .map((s) => `• *${s.employee}* — ${s.position || 'TBD'} (${fmtTimePT(s.start)}–${fmtTimePT(s.end)})`);
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*☕ Clement*\n${lines.join('\n')}` } });
+  }
+
+  if (ninthShifts.length > 0) {
+    blocks.push({ type: 'divider' });
+    const lines = ninthShifts
+      .sort((a, b) => a.start.localeCompare(b.start))
+      .map((s) => `• *${s.employee}* — ${s.position || 'TBD'} (${fmtTimePT(s.start)}–${fmtTimePT(s.end)})`);
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*🏠 9th St*\n${lines.join('\n')}` } });
+  }
+
+  if (working.length === 0) {
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '_No one scheduled._' } });
+  }
+
+  blocks.push({ type: 'divider' });
+  blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `${working.length} employees · ${nowPT()}` }] });
+
+  return { text: fallback, blocks };
+}
+
+// ─── BACKWARD COMPAT ────────────────────────────────────────
+
+function formatScheduleForSlack(dateStr, shifts) {
+  const { text } = formatScheduleBlocks(dateStr, shifts);
+  return text;
+}
+
+// ─── postToSlack ────────────────────────────────────────────
+
+async function postToSlack(text, blocks) {
+  const webhookUrl = process.env.SLACK_WEBHOOK_URL;
+  const botToken = SLACK_BOT_TOKEN;
+
+  if (webhookUrl) {
+    const body = { text };
+    // Webhooks support blocks too
+    if (blocks) body.blocks = blocks;
+    const res = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    return { ok: res.ok, status: res.status };
+  }
+
+  if (botToken) {
+    const body = { channel: SLACK_CHANNEL, text };
+    if (blocks) body.blocks = blocks;
+    const res = await fetch('https://slack.com/api/chat.postMessage', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${botToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    return res.json();
+  }
+
+  console.log('No Slack credentials configured, skipping post');
+  return null;
+}
+
+// ─── replyInSlack (threaded, with blocks) ───────────────────
+
+async function replyInSlack(channel, threadTs, text, blocks) {
+  if (!SLACK_BOT_TOKEN) return null;
+  const body = { channel, text, thread_ts: threadTs };
+  if (blocks) body.blocks = blocks;
+  const res = await fetch('https://slack.com/api/chat.postMessage', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${SLACK_BOT_TOKEN}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return res.json();
+}
+
+// ─── DAILY SCHEDULER ────────────────────────────────────────
+
 function startDailyScheduler() {
   if (!SLACK_BOT_TOKEN && !process.env.SLACK_WEBHOOK_URL) {
     console.log('No Slack credentials set, daily scheduler disabled');
@@ -1987,8 +2309,8 @@ function startDailyScheduler() {
         const { start, end, dateFormatted } = getDayRange('tomorrow');
         const { shifts } = await getOrgCalendar(start, end);
 
-        const message = formatScheduleForSlack(dateFormatted, shifts);
-        const result = await postToSlack(message);
+        const { text, blocks } = formatScheduleBlocks(dateFormatted, shifts);
+        const result = await postToSlack(text, blocks);
         console.log('Daily scheduler: posted successfully', result?.ok);
 
         try {
@@ -2009,70 +2331,14 @@ function startDailyScheduler() {
   console.log(`Daily scheduler: will post tomorrow's schedule at ${POST_HOUR}:00 PT`);
 }
 
-async function postToSlack(text, blocks) {
-  const webhookUrl = process.env.SLACK_WEBHOOK_URL;
-  const botToken = SLACK_BOT_TOKEN;
-
-  if (webhookUrl) {
-    const res = await fetch(webhookUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text }),
-    });
-    return { ok: res.ok, status: res.status };
-  }
-
-  if (botToken) {
-    const body = { channel: SLACK_CHANNEL, text };
-    if (blocks) body.blocks = blocks;
-
-    const res = await fetch('https://slack.com/api/chat.postMessage', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${botToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-
-    return res.json();
-  }
-
-  console.log('No Slack credentials configured, skipping post');
-  return null;
-}
-
-function formatScheduleForSlack(dateStr, shifts) {
-  const clementShifts = shifts.filter((s) => (s.location || '').includes('Clement'));
-  const ninthShifts = shifts.filter((s) => (s.location || '').includes('9th'));
-
-  let text = `📋 *Schedule for ${dateStr}*\n\n`;
-
-  if (clementShifts.length > 0) {
-    text += `*Clement Pixlcat* (${clementShifts.length} shifts)\n`;
-    clementShifts.sort((a, b) => a.start.localeCompare(b.start));
-    for (const s of clementShifts) {
-      text += `  • ${s.employee} — ${s.position || 'TBD'} (${formatTimePT(s.start)} - ${formatTimePT(s.end)})\n`;
-    }
-  }
-
-  if (ninthShifts.length > 0) {
-    text += `\n*9th St Pixlcat* (${ninthShifts.length} shifts)\n`;
-    ninthShifts.sort((a, b) => a.start.localeCompare(b.start));
-    for (const s of ninthShifts) {
-      text += `  • ${s.employee} — ${s.position || 'TBD'} (${formatTimePT(s.start)} - ${formatTimePT(s.end)})\n`;
-    }
-  }
-
-  if (shifts.length === 0) text += '*No shifts scheduled.*\n';
-  return text;
-}
+// ─── SLACK ROUTES ───────────────────────────────────────────
 
 app.get('/slack/daily', async (req, res) => {
   try {
     const { start, end, dateFormatted } = getDayRange('today');
     const { shifts } = await getOrgCalendar(start, end);
-
-    const message = formatScheduleForSlack(dateFormatted, shifts);
-    const result = await postToSlack(message);
-
+    const { text, blocks } = formatScheduleBlocks(dateFormatted, shifts);
+    const result = await postToSlack(text, blocks);
     res.json({ success: true, message: 'Posted daily schedule to Slack', slackResult: result });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -2083,10 +2349,8 @@ app.get('/slack/tomorrow', async (req, res) => {
   try {
     const { start, end, dateFormatted } = getDayRange('tomorrow');
     const { shifts } = await getOrgCalendar(start, end);
-
-    const message = formatScheduleForSlack(dateFormatted, shifts);
-    const result = await postToSlack(message);
-
+    const { text, blocks } = formatScheduleBlocks(dateFormatted, shifts);
+    const result = await postToSlack(text, blocks);
     res.json({ success: true, message: 'Posted tomorrow schedule to Slack', slackResult: result });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -2101,8 +2365,8 @@ app.get('/cron/daily', async (req, res) => {
     const { start, end, dateFormatted } = getDayRange('tomorrow');
     const { shifts } = await getOrgCalendar(start, end);
 
-    const message = formatScheduleForSlack(dateFormatted, shifts);
-    await postToSlack(message);
+    const { text, blocks } = formatScheduleBlocks(dateFormatted, shifts);
+    await postToSlack(text, blocks);
 
     try {
       await fetch(`http://127.0.0.1:${PORT}/cron/check-conflicts`, { method: 'POST', headers: { 'x-api-key': API_KEY } });
@@ -2131,32 +2395,29 @@ app.get('/slack/week', async (req, res) => {
 
     const { shifts } = await getOrgCalendar(startOfWeek.toISOString(), endOfWeek.toISOString());
 
-    const byDay = {};
-    shifts.forEach((s) => {
-      const day = new Date(s.start).toLocaleDateString('en-US', {
-        weekday: 'long',
-        month: 'short',
-        day: 'numeric',
-        timeZone: 'America/Los_Angeles',
-      });
-      if (!byDay[day]) byDay[day] = [];
-      byDay[day].push(s);
-    });
-
-    let text = `📅 *Week Schedule (${startOfWeek.toLocaleDateString('en-US', {
-      month: 'short',
-      day: 'numeric',
-    })} - ${endOfWeek.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })})*\n\n`;
-
-    for (const [day, dayShifts] of Object.entries(byDay)) {
-      const clementOnly = dayShifts.filter((s) => (s.location || '').includes('Clement'));
-      text += `*${day}* (${clementOnly.length} Clement shifts)\n`;
-      clementOnly.sort((a, b) => a.start.localeCompare(b.start));
-      for (const s of clementOnly) text += `  ${s.employee} — ${s.position || 'TBD'} (${formatTimePT(s.start)}-${formatTimePT(s.end)})\n`;
-      text += '\n';
+    // Build day schedules for Block Kit
+    const dayMap = {};
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(startOfWeek);
+      d.setDate(startOfWeek.getDate() + i);
+      const key = d.toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+      dayMap[key] = {
+        dateFormatted: d.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/Los_Angeles' }),
+        shifts: [],
+        isWeekend: [0, 6].includes(d.getDay()),
+      };
     }
 
-    const result = await postToSlack(text);
+    for (const s of shifts) {
+      const key = new Date(s.start).toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+      if (dayMap[key]) dayMap[key].shifts.push(s);
+    }
+
+    const daySchedules = Object.values(dayMap);
+    const weekLabel = `Week of ${daySchedules[0].dateFormatted} – ${daySchedules[6].dateFormatted}`;
+    const { text, blocks } = formatWeekBlocks(weekLabel, daySchedules);
+    const result = await postToSlack(text, blocks);
+
     res.json({ success: true, message: 'Posted week schedule to Slack', slackResult: result });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -2164,7 +2425,7 @@ app.get('/slack/week', async (req, res) => {
 });
 
 // ============================================================
-// SLACK EVENTS API
+// SLACK EVENTS API — Interactive bot (Block Kit responses)
 // ============================================================
 
 app.post('/slack/events', async (req, res) => {
@@ -2180,54 +2441,55 @@ app.post('/slack/events', async (req, res) => {
   if (event.channel !== SLACK_CHANNEL) return;
 
   const text = (event.text || '').toLowerCase().trim();
+  const channel = event.channel;
+  const threadTs = event.ts;
 
   try {
+    // Schedule today
     if (text.includes('schedule today') || text === 'today') {
       const { start, end, dateFormatted } = getDayRange('today');
       const { shifts } = await getOrgCalendar(start, end);
-      await postToSlack(formatScheduleForSlack(dateFormatted, shifts));
+      const { text: fallback, blocks } = formatScheduleBlocks(dateFormatted, shifts);
+      await replyInSlack(channel, threadTs, fallback, blocks);
+
+    // Schedule tomorrow
     } else if (text.includes('schedule tomorrow') || text === 'tomorrow') {
       const { start, end, dateFormatted } = getDayRange('tomorrow');
       const { shifts } = await getOrgCalendar(start, end);
-      await postToSlack(formatScheduleForSlack(dateFormatted, shifts));
+      const { text: fallback, blocks } = formatScheduleBlocks(dateFormatted, shifts);
+      await replyInSlack(channel, threadTs, fallback, blocks);
+
+    // Who's working
     } else if (text.match(/who(?:'s| is) working/)) {
       const dateMatch = text.match(/working\s+(\w+)/);
       const date = dateMatch ? dateMatch[1] : 'today';
       const { start, end, dateFormatted } = getDayRange(date);
       const { shifts } = await getOrgCalendar(start, end);
-
       const working = shifts.filter((s) => s.employeeId);
-      let msg = `*Working ${dateFormatted}:*\n`;
-      working.forEach((s) => {
-        msg += `* ${s.employee} -- ${s.position || 'TBD'} (${formatTimePT(s.start)}-${formatTimePT(s.end)})\n`;
-      });
-      if (working.length === 0) msg += '*No one scheduled.*';
-      await postToSlack(msg);
+      const { text: fallback, blocks } = formatWhosWorkingBlocks(dateFormatted, working);
+      await replyInSlack(channel, threadTs, fallback, blocks);
+
+    // Conflicts
     } else if (text.includes('conflict')) {
       const confRes = await fetch(`http://127.0.0.1:${PORT}/conflicts?days=7`);
       const conflicts = await confRes.json();
 
       if (conflicts.conflictCount === 0) {
-        await postToSlack('[OK] No schedule conflicts found for the next 7 days.');
+        await replyInSlack(channel, threadTs, '✅ No schedule conflicts found for the next 7 days.');
       } else {
-        let msg = `[ALERT] *${conflicts.conflictCount} Conflict(s) Found*\n`;
-        conflicts.conflicts.forEach((c) => {
-          msg += `* *${c.type}* -- ${c.message}\n`;
-        });
-        await postToSlack(msg);
+        const { text: fallback, blocks } = formatConflictBlocks(conflicts.conflicts, conflicts.period);
+        await replyInSlack(channel, threadTs, fallback, blocks);
       }
+
+    // Hours for employee
     } else if (text.match(/hours\s+(?:for\s+)?(\w+)/)) {
       const match = text.match(/hours\s+(?:for\s+)?(\w+)/);
       const uid = resolveEmployeeId(match[1]);
       if (uid) {
         const hoursRes = await fetch(`http://127.0.0.1:${PORT}/weekly-hours/${uid}`);
         const data = await hoursRes.json();
-
-        await postToSlack(
-          `[STATS] *${data.employee} -- This Week*\n` +
-            `Total: ${data.totalHours}hrs | Clement: ${data.clementHours}hrs | 9th St: ${data.ninthStHours}hrs\n` +
-            `Remaining before 40hr cap: ${data.remainingBeforeOT}hrs`
-        );
+        const { text: fallback, blocks } = formatHoursBlocks(data);
+        await replyInSlack(channel, threadTs, fallback, blocks);
       }
     }
   } catch (err) {
@@ -2240,7 +2502,7 @@ app.post('/slack/events', async (req, res) => {
 // ============================================================
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', version: '2.0.0', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', version: '2.1.0', timestamp: new Date().toISOString() });
 });
 
 // ============================================================
@@ -2248,6 +2510,6 @@ app.get('/health', (req, res) => {
 // ============================================================
 
 app.listen(PORT, () => {
-  console.log(`Pixlcat Sling API v2.0.0 running on port ${PORT}`);
+  console.log(`Pixlcat Sling API v2.1.0 running on port ${PORT}`);
   startDailyScheduler();
 });
