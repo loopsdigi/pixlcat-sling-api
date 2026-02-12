@@ -935,6 +935,197 @@ app.get('/slack/week', async (req, res) => {
 });
 
 // ============================================================
+// SLACK EVENTS API — Interactive bot
+// ============================================================
+
+const SLACK_SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET;
+const BOT_USER_ID = process.env.SLACK_BOT_USER_ID; // Set after install, or auto-detect
+
+// Reply to a message in the same channel (threaded)
+async function replyInSlack(channel, threadTs, text) {
+  if (!SLACK_BOT_TOKEN) return null;
+  const body = { channel, text, thread_ts: threadTs };
+  const res = await fetch('https://slack.com/api/chat.postMessage', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${SLACK_BOT_TOKEN}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(body)
+  });
+  return res.json();
+}
+
+// Parse a natural language schedule question
+function parseScheduleQuestion(text) {
+  const lower = text.toLowerCase().replace(/<[^>]+>/g, '').trim(); // Strip Slack mentions
+  
+  const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+  
+  // "who's working [day]?" or "who works [day]?"
+  const whosWorkingMatch = lower.match(/who(?:'s|s|\sis)\s+(?:working|on|scheduled)?\s*(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|this weekend|next week)?/i);
+  
+  // "schedule for [day]" or "[day] schedule"
+  const scheduleMatch = lower.match(/schedule\s+(?:for\s+)?(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|this week|next week|weekend)/i)
+    || lower.match(/(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|this week|next week|weekend)(?:'s)?\s+schedule/i);
+  
+  // "what's [day] look like?"
+  const whatsMatch = lower.match(/what(?:'s|s|\sdoes)\s+(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|this weekend)\s+look/i);
+  
+  // "week" or "this week" or "weekly schedule"
+  const weekMatch = lower.match(/(?:this\s+)?week(?:ly)?\s*(?:schedule)?|full\s+(?:week|schedule)/i);
+  
+  // "weekend" 
+  const weekendMatch = lower.match(/(?:this\s+)?weekend/i);
+  
+  // Extract the day
+  let targetDay = null;
+  const match = whosWorkingMatch || scheduleMatch || whatsMatch;
+  if (match) {
+    targetDay = (match[1] || 'today').toLowerCase().trim();
+  }
+  
+  if (weekMatch && !targetDay) return { type: 'week' };
+  if (weekendMatch && !targetDay) return { type: 'weekend' };
+  if (targetDay === 'this week' || targetDay === 'next week') return { type: 'week' };
+  if (targetDay === 'this weekend' || targetDay === 'weekend') return { type: 'weekend' };
+  if (targetDay) return { type: 'day', day: targetDay };
+  
+  // Fallback — check if any day name is in the text
+  for (const d of days) {
+    if (lower.includes(d)) return { type: 'day', day: d };
+  }
+  if (lower.includes('today')) return { type: 'day', day: 'today' };
+  if (lower.includes('tomorrow')) return { type: 'day', day: 'tomorrow' };
+  
+  return null;
+}
+
+// Handle a parsed schedule question and return response text
+async function handleScheduleQuestion(parsed) {
+  if (parsed.type === 'week') {
+    const now = new Date();
+    const startOfWeek = new Date(now);
+    startOfWeek.setDate(now.getDate() - now.getDay());
+    startOfWeek.setHours(0, 0, 0, 0);
+    const endOfWeek = new Date(startOfWeek);
+    endOfWeek.setDate(startOfWeek.getDate() + 6);
+    endOfWeek.setHours(23, 59, 59, 999);
+    
+    const { shifts } = await getOrgCalendar(startOfWeek.toISOString(), endOfWeek.toISOString());
+    const byDay = {};
+    shifts.forEach(s => {
+      const day = new Date(s.start).toLocaleDateString('en-US', { weekday: 'long', timeZone: 'America/Los_Angeles' });
+      if (!byDay[day]) byDay[day] = [];
+      byDay[day].push(s);
+    });
+    
+    let text = `📅 *This Week's Schedule*\n\n`;
+    const dayOrder = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    for (const day of dayOrder) {
+      if (!byDay[day]) continue;
+      const clement = byDay[day].filter(s => (s.location || '').includes('Clement'));
+      if (clement.length === 0) continue;
+      text += `*${day}*\n`;
+      clement.sort((a, b) => a.start.localeCompare(b.start));
+      for (const s of clement) {
+        const st = new Date(s.start).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
+        const et = new Date(s.end).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
+        text += `  • ${s.employee} — ${s.position || 'TBD'} (${st}-${et})\n`;
+      }
+      text += '\n';
+    }
+    return text;
+  }
+  
+  if (parsed.type === 'weekend') {
+    // Get Saturday and Sunday
+    const now = new Date();
+    const dayOfWeek = now.getDay();
+    const satOffset = 6 - dayOfWeek;
+    const sat = new Date(now);
+    sat.setDate(now.getDate() + satOffset);
+    sat.setHours(0, 0, 0, 0);
+    const sunEnd = new Date(sat);
+    sunEnd.setDate(sat.getDate() + 1);
+    sunEnd.setHours(23, 59, 59, 999);
+    
+    const { shifts } = await getOrgCalendar(sat.toISOString(), sunEnd.toISOString());
+    
+    let text = `🗓️ *Weekend Schedule*\n\n`;
+    for (const dayLabel of ['Saturday', 'Sunday']) {
+      const dayShifts = shifts.filter(s => {
+        const d = new Date(s.start).toLocaleDateString('en-US', { weekday: 'long', timeZone: 'America/Los_Angeles' });
+        return d === dayLabel && (s.location || '').includes('Clement');
+      });
+      if (dayShifts.length === 0) continue;
+      text += `*${dayLabel}*\n`;
+      dayShifts.sort((a, b) => a.start.localeCompare(b.start));
+      for (const s of dayShifts) {
+        const st = new Date(s.start).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
+        const et = new Date(s.end).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
+        text += `  • ${s.employee} — ${s.position || 'TBD'} (${st}-${et})\n`;
+      }
+      text += '\n';
+    }
+    return text;
+  }
+  
+  // Single day
+  const { start, end, dateFormatted } = getDayRange(parsed.day);
+  const { shifts } = await getOrgCalendar(start, end);
+  return formatScheduleForSlack(dateFormatted, shifts);
+}
+
+// POST /slack/events — Slack Events API endpoint
+app.post('/slack/events', async (req, res) => {
+  const body = req.body;
+  
+  // URL verification challenge (Slack sends this when you first configure events)
+  if (body.type === 'url_verification') {
+    return res.json({ challenge: body.challenge });
+  }
+  
+  // Acknowledge immediately (Slack requires response within 3 seconds)
+  res.status(200).json({ ok: true });
+  
+  // Process the event asynchronously
+  try {
+    const event = body.event;
+    if (!event) return;
+    
+    // Only respond to messages (not bot messages, not edits)
+    if (event.type !== 'message') return;
+    if (event.subtype) return; // Ignore edits, joins, bot messages, etc.
+    if (event.bot_id) return; // Ignore bot messages
+    
+    // Only respond in our scheduling channel (or DMs with the bot)
+    const isSchedulingChannel = event.channel === SLACK_CHANNEL;
+    const isDM = event.channel_type === 'im';
+    if (!isSchedulingChannel && !isDM) return;
+    
+    const text = event.text || '';
+    const parsed = parseScheduleQuestion(text);
+    
+    if (!parsed) {
+      // If in DM, give a helpful hint. In channel, stay quiet for non-schedule messages.
+      if (isDM) {
+        await replyInSlack(event.channel, event.ts, 
+          `Hey! Ask me about the schedule. Try:\n• "Who's working today?"\n• "Saturday schedule"\n• "This week"\n• "Weekend"`
+        );
+      }
+      return;
+    }
+    
+    const response = await handleScheduleQuestion(parsed);
+    await replyInSlack(event.channel, event.ts, response);
+    
+  } catch (err) {
+    console.error('Slack event handler error:', err.message);
+  }
+});
+
+// ============================================================
 // START
 // ============================================================
 
