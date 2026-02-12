@@ -433,6 +433,434 @@ app.get('/unavailable/:date', async (req, res) => {
   }
 });
 
+// ============================================================
+// COVERAGE FINDER
+// Dynamically pulls from Sling: availability, leave, shift history
+// Factors in: Pixlcat hours, historical avg hours, sales patterns
+// Hard rules: 40hr/week max, no work when unavailable, 6 consecutive max
+// ============================================================
+
+// Pixlcat operating hours (customer-facing)
+// Shifts can start 30min before open (prep) and end up to 1hr after close (closing duties)
+const STORE_HOURS = {
+  0: { open: 7, close: 17, shiftEarliest: 6.5, shiftLatest: 18, label: 'Sunday' },
+  1: { open: 7, close: 16, shiftEarliest: 6.5, shiftLatest: 17, label: 'Monday' },
+  2: { open: 7, close: 16, shiftEarliest: 6.5, shiftLatest: 17, label: 'Tuesday' },
+  3: { open: 7, close: 16, shiftEarliest: 6.5, shiftLatest: 17, label: 'Wednesday' },
+  4: { open: 7, close: 16, shiftEarliest: 6.5, shiftLatest: 17, label: 'Thursday' },
+  5: { open: 7, close: 16, shiftEarliest: 6.5, shiftLatest: 17, label: 'Friday' },
+  6: { open: 7, close: 17, shiftEarliest: 6.5, shiftLatest: 18, label: 'Saturday' },
+};
+
+// Derive recurring shift slot templates from last 4 weeks of actual Sling schedules
+// This adapts automatically as scheduling patterns change
+async function getShiftTemplates() {
+  const now = new Date();
+  const fourWeeksAgo = new Date(now);
+  fourWeeksAgo.setDate(now.getDate() - 28);
+  fourWeeksAgo.setHours(0, 0, 0, 0);
+  
+  const { shifts } = await getOrgCalendar(fourWeeksAgo.toISOString(), now.toISOString());
+  const clementShifts = shifts.filter(s => (s.location || '').includes('Clement'));
+  
+  // Count occurrences of each position + time slot + day type
+  const slotCounts = {};
+  clementShifts.forEach(s => {
+    const st = new Date(s.start);
+    const et = new Date(s.end);
+    const isWeekend = st.getDay() === 0 || st.getDay() === 6;
+    const dayType = isWeekend ? 'weekend' : 'weekday';
+    const startHr = st.getHours() + st.getMinutes() / 60;
+    const endHr = et.getHours() + et.getMinutes() / 60;
+    const hrs = (et - st) / (1000 * 60 * 60);
+    const startTime = `${st.getHours()}:${String(st.getMinutes()).padStart(2, '0')}`;
+    const endTime = `${et.getHours()}:${String(et.getMinutes()).padStart(2, '0')}`;
+    const key = `${s.position || 'Unknown'}|${startTime}|${endTime}|${dayType}`;
+    
+    if (!slotCounts[key]) {
+      slotCounts[key] = {
+        position: s.position || 'Unknown',
+        startTime, endTime, startHr, endHr,
+        hours: hrs, dayType, count: 0
+      };
+    }
+    slotCounts[key].count++;
+  });
+  
+  // Sort by frequency — most common = standard templates
+  const templates = Object.values(slotCounts)
+    .filter(t => t.count >= 3) // Only patterns seen 3+ times
+    .sort((a, b) => b.count - a.count);
+  
+  return templates;
+}
+
+// Check if a coverage shift matches a known template slot
+function matchesTemplate(shiftToCover, templates) {
+  const st = new Date(shiftToCover.start);
+  const et = new Date(shiftToCover.end);
+  const isWeekend = st.getDay() === 0 || st.getDay() === 6;
+  const dayType = isWeekend ? 'weekend' : 'weekday';
+  const startTime = `${st.getHours()}:${String(st.getMinutes()).padStart(2, '0')}`;
+  const endTime = `${et.getHours()}:${String(et.getMinutes()).padStart(2, '0')}`;
+  
+  const exact = templates.find(t =>
+    t.position === shiftToCover.position &&
+    t.startTime === startTime &&
+    t.endTime === endTime &&
+    t.dayType === dayType
+  );
+  if (exact) return { match: 'exact', template: exact };
+  
+  // Check same position, same day type, any time
+  const posMatch = templates.find(t =>
+    t.position === shiftToCover.position &&
+    t.dayType === dayType
+  );
+  if (posMatch) return { match: 'position', template: posMatch };
+  
+  // Check same time slot, any position
+  const timeMatch = templates.find(t =>
+    t.startTime === startTime &&
+    t.endTime === endTime &&
+    t.dayType === dayType
+  );
+  if (timeMatch) return { match: 'time', template: timeMatch };
+  
+  return { match: 'none', template: null };
+}
+
+// Historical avg weekly hours (refreshed on each call from last 4 weeks)
+async function getHistoricalAvgHours() {
+  const now = new Date();
+  const fourWeeksAgo = new Date(now);
+  fourWeeksAgo.setDate(now.getDate() - 28);
+  fourWeeksAgo.setHours(0, 0, 0, 0);
+  
+  const { shifts } = await getOrgCalendar(fourWeeksAgo.toISOString(), now.toISOString());
+  
+  // Only Clement shifts
+  const clementShifts = shifts.filter(s => (s.location || '').includes('Clement'));
+  
+  // Group by employee by week
+  const byEmployee = {};
+  clementShifts.forEach(s => {
+    if (!s.employeeId) return;
+    if (!byEmployee[s.employeeId]) byEmployee[s.employeeId] = {};
+    const weekKey = getWeekKey(new Date(s.start));
+    if (!byEmployee[s.employeeId][weekKey]) byEmployee[s.employeeId][weekKey] = 0;
+    const hrs = (new Date(s.end) - new Date(s.start)) / (1000 * 60 * 60);
+    byEmployee[s.employeeId][weekKey] += hrs;
+  });
+  
+  // Calculate averages
+  const avgHours = {};
+  for (const [empId, weeks] of Object.entries(byEmployee)) {
+    const hrs = Object.values(weeks);
+    avgHours[empId] = {
+      avg: hrs.reduce((a, b) => a + b, 0) / hrs.length,
+      min: Math.min(...hrs),
+      max: Math.max(...hrs),
+      weeks: hrs.length
+    };
+  }
+  return avgHours;
+}
+
+function getWeekKey(date) {
+  const d = new Date(date);
+  d.setDate(d.getDate() - d.getDay()); // Sunday
+  return d.toISOString().slice(0, 10);
+}
+
+// Fetch Toast sales data for a given day to assess shift importance
+async function getDaySalesContext(targetDate) {
+  try {
+    const dayOfWeek = targetDate.getDay();
+    const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+    const dayName = STORE_HOURS[dayOfWeek].label;
+    
+    // Try Toast API for historical revenue
+    const toastRes = await fetch(`https://toast-api-1.onrender.com/api/sales/summary`);
+    if (toastRes.ok) {
+      const salesData = await toastRes.json();
+      return {
+        dayName,
+        isWeekend,
+        isPeak: isWeekend || dayOfWeek === 5, // Fri-Sun
+        storeHours: STORE_HOURS[dayOfWeek],
+        salesData: salesData
+      };
+    }
+  } catch (e) {
+    // Toast API unavailable, use known averages from memory
+  }
+  
+  const dayOfWeek = targetDate.getDay();
+  const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+  return {
+    dayName: STORE_HOURS[dayOfWeek].label,
+    isWeekend,
+    isPeak: isWeekend || dayOfWeek === 5,
+    storeHours: STORE_HOURS[dayOfWeek],
+    avgRevenue: isWeekend ? 3610 : 1807,
+    avgTickets: isWeekend ? 292 : 169
+  };
+}
+
+async function findCoverage(targetDay, targetEmployeeName) {
+  const { start, end, dateFormatted } = getDayRange(targetDay);
+  const targetDate = new Date(start);
+  
+  // Get the full week containing targetDay (Sun-Sat)
+  const weekStart = new Date(targetDate);
+  weekStart.setDate(targetDate.getDate() - targetDate.getDay());
+  weekStart.setHours(0, 0, 0, 0);
+  const weekEnd = new Date(weekStart);
+  weekEnd.setDate(weekStart.getDate() + 6);
+  weekEnd.setHours(23, 59, 59, 999);
+  
+  // Wider window for consecutive-shift check
+  const streakStart = new Date(targetDate);
+  streakStart.setDate(targetDate.getDate() - 6);
+  streakStart.setHours(0, 0, 0, 0);
+  const streakEnd = new Date(targetDate);
+  streakEnd.setDate(targetDate.getDate() + 6);
+  streakEnd.setHours(23, 59, 59, 999);
+  
+  // Fetch all data in parallel
+  const [weekData, streakData, allUsers, historicalAvg, salesContext, shiftTemplates] = await Promise.all([
+    getOrgCalendar(weekStart.toISOString(), weekEnd.toISOString()),
+    getOrgCalendar(streakStart.toISOString(), streakEnd.toISOString()),
+    slingGet('/users'),
+    getHistoricalAvgHours(),
+    getDaySalesContext(targetDate),
+    getShiftTemplates()
+  ]);
+  
+  const { shifts: weekShifts, leaves: weekLeaves, availability: weekAvail } = weekData;
+  const { shifts: streakShifts } = streakData;
+  
+  // Find the target shift to cover
+  const shiftDateStr = targetDate.toDateString();
+  const targetShifts = weekShifts.filter(s => {
+    const isTargetDate = new Date(s.start).toDateString() === shiftDateStr;
+    if (!targetEmployeeName) return isTargetDate;
+    return isTargetDate && s.employee.toLowerCase().includes(targetEmployeeName.toLowerCase());
+  });
+  
+  if (targetShifts.length === 0) {
+    return { error: `No shift found for ${targetEmployeeName || 'anyone'} on ${dateFormatted}` };
+  }
+  
+  const shiftToCover = targetShifts[0];
+  const shiftHours = (new Date(shiftToCover.end) - new Date(shiftToCover.start)) / (1000 * 60 * 60);
+  
+  // Build set of all Clement employees
+  const clementEmployeeIds = new Set();
+  weekShifts.filter(s => (s.location || '').includes('Clement')).forEach(s => {
+    if (s.employeeId) clementEmployeeIds.add(s.employeeId);
+  });
+  streakShifts.filter(s => (s.location || '').includes('Clement')).forEach(s => {
+    if (s.employeeId) clementEmployeeIds.add(s.employeeId);
+  });
+  // Also include anyone with availability set (they're on the team even if not scheduled this week)
+  weekAvail.forEach(a => { if (a.employeeId) clementEmployeeIds.add(a.employeeId); });
+  
+  const candidates = [];
+  
+  for (const empId of clementEmployeeIds) {
+    if (empId === shiftToCover.employeeId) continue;
+    
+    const user = allUsers.find(u => u.id === empId);
+    if (!user) continue;
+    const empName = `${user.name || ''} ${user.lname || ''}`.trim();
+    
+    const reasons = [];  // Why they CAN'T cover
+    const warnings = []; // Soft concerns
+    const notes = [];    // Neutral info
+    
+    // --- HARD RULE: Already working that day? ---
+    const alreadyWorking = weekShifts.filter(s =>
+      s.employeeId === empId && new Date(s.start).toDateString() === shiftDateStr
+    );
+    if (alreadyWorking.length > 0) {
+      const existing = alreadyWorking[0];
+      const st = new Date(existing.start).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
+      const et = new Date(existing.end).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
+      // Check if shifts overlap or if they could do a double
+      const existingEnd = new Date(existing.end);
+      const coverStart = new Date(shiftToCover.start);
+      const existingStart = new Date(existing.start);
+      const coverEnd = new Date(shiftToCover.end);
+      if (existingStart < coverEnd && existingEnd > coverStart) {
+        reasons.push(`Already working ${st}-${et} (overlaps)`);
+      } else {
+        warnings.push(`Already has a shift ${st}-${et} (no overlap — double possible)`);
+      }
+    }
+    
+    // --- HARD RULE: On leave that day? ---
+    const onLeave = weekLeaves.some(l =>
+      l.employeeId === empId &&
+      new Date(l.start) <= targetDate && new Date(l.end) >= targetDate
+    );
+    if (onLeave) {
+      const leave = weekLeaves.find(l => l.employeeId === empId && new Date(l.start) <= targetDate && new Date(l.end) >= targetDate);
+      reasons.push(`On leave` + (leave && leave.note ? ` — ${leave.note}` : ''));
+    }
+    
+    // --- HARD RULE: Unavailable per Sling availability? ---
+    const dayAvail = weekAvail.filter(a =>
+      a.employeeId === empId &&
+      new Date(a.start).toDateString() === shiftDateStr
+    );
+    // If they have availability entries for this day, check if shift fits
+    if (dayAvail.length > 0) {
+      const hasFullDay = dayAvail.some(a => a.fullDay);
+      if (!hasFullDay) {
+        const shiftStart = new Date(shiftToCover.start);
+        const shiftEnd = new Date(shiftToCover.end);
+        const fits = dayAvail.some(a => {
+          return shiftStart >= new Date(a.start) && shiftEnd <= new Date(a.end);
+        });
+        if (!fits) {
+          const windows = dayAvail.map(a => {
+            const st = new Date(a.start).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
+            const et = new Date(a.end).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
+            return `${st}-${et}`;
+          }).join(', ');
+          reasons.push(`Only available ${windows} (shift doesn't fit)`);
+        } else {
+          notes.push(`Available window covers this shift`);
+        }
+      }
+    } else {
+      // No availability set for this day = not available (Sling treats missing availability as unavailable)
+      // But only flag this if they have availability set for OTHER days (meaning they use the system)
+      const hasAnyAvail = weekAvail.some(a => a.employeeId === empId);
+      if (hasAnyAvail) {
+        reasons.push(`No availability set for ${STORE_HOURS[targetDate.getDay()].label}`);
+      }
+    }
+    
+    // --- HARD RULE: Would exceed 40 hours this week? ---
+    const weeklyShifts = weekShifts.filter(s => s.employeeId === empId);
+    let weeklyHours = 0;
+    weeklyShifts.forEach(s => {
+      weeklyHours += (new Date(s.end) - new Date(s.start)) / (1000 * 60 * 60);
+    });
+    const projectedHours = weeklyHours + shiftHours;
+    if (projectedHours > 40) {
+      reasons.push(`Would hit ${projectedHours.toFixed(1)}hrs (40hr max)`);
+    }
+    
+    // --- HARD RULE: Would exceed 6 consecutive shifts? ---
+    // 7+ consecutive = blocked. 6th shift = warning only.
+    const streakDatesWorked = new Set(
+      streakShifts.filter(s => s.employeeId === empId).map(s => new Date(s.start).toDateString())
+    );
+    streakDatesWorked.add(shiftDateStr); // Add coverage day
+    let maxConsecutive = 0, current = 0;
+    for (let d = new Date(streakStart); d <= streakEnd; d.setDate(d.getDate() + 1)) {
+      if (streakDatesWorked.has(d.toDateString())) {
+        current++;
+        maxConsecutive = Math.max(maxConsecutive, current);
+      } else {
+        current = 0;
+      }
+    }
+    if (maxConsecutive > 6) {
+      reasons.push(`Would be ${maxConsecutive} consecutive days (6 max)`);
+    } else if (maxConsecutive === 6) {
+      warnings.push(`⚡ This would be their 6th consecutive day`);
+    }
+    
+    // --- WARNING: 6th shift this week ---
+    const shiftsThisWeek = weekShifts.filter(s => s.employeeId === empId).length;
+    if (shiftsThisWeek + 1 === 6) {
+      warnings.push(`This would be their 6th shift this week`);
+    } else if (shiftsThisWeek + 1 > 6) {
+      warnings.push(`Would be shift #${shiftsThisWeek + 1} this week`);
+    }
+    
+    // --- SOFT: Historical hours comparison ---
+    const hist = historicalAvg[empId];
+    if (hist) {
+      const overAvg = projectedHours - hist.avg;
+      if (overAvg > 8) {
+        warnings.push(`${overAvg.toFixed(1)}hrs above their usual ${hist.avg.toFixed(1)}hrs/week`);
+      }
+      notes.push(`Usually ${hist.avg.toFixed(1)}hrs/wk (${hist.min.toFixed(0)}-${hist.max.toFixed(0)} range)`);
+    }
+    
+    // Weekly hours note
+    notes.push(`${weeklyHours.toFixed(1)}hrs this week → ${projectedHours.toFixed(1)}hrs if covering`);
+    
+    candidates.push({
+      employee: empName,
+      employeeId: empId,
+      available: reasons.length === 0,
+      reasons,
+      warnings,
+      notes,
+      weeklyHours,
+      projectedHours,
+      historicalAvg: hist ? hist.avg : null
+    });
+  }
+  
+  // Sort: available first, then by fewest projected hours (most capacity)
+  candidates.sort((a, b) => {
+    if (a.available && !b.available) return -1;
+    if (!a.available && b.available) return 1;
+    // Among available, prefer those with fewest hours this week
+    if (a.available && b.available) return a.projectedHours - b.projectedHours;
+    return 0;
+  });
+  
+  // Check if this shift matches a known Sling template
+  const templateMatch = matchesTemplate(shiftToCover, shiftTemplates);
+  
+  return {
+    date: dateFormatted,
+    dayContext: {
+      dayName: salesContext.dayName,
+      isPeak: salesContext.isPeak,
+      storeHours: `${salesContext.storeHours.open}AM-${salesContext.storeHours.close > 12 ? salesContext.storeHours.close - 12 + 'PM' : salesContext.storeHours.close + 'AM'}`,
+      shiftWindow: `${salesContext.storeHours.shiftEarliest % 1 === 0.5 ? Math.floor(salesContext.storeHours.shiftEarliest) + ':30AM' : salesContext.storeHours.shiftEarliest + 'AM'}-${salesContext.storeHours.shiftLatest > 12 ? salesContext.storeHours.shiftLatest - 12 + 'PM' : salesContext.storeHours.shiftLatest + 'AM'}`,
+      avgRevenue: salesContext.avgRevenue,
+      avgTickets: salesContext.avgTickets
+    },
+    shiftToCover: {
+      employee: shiftToCover.employee,
+      position: shiftToCover.position,
+      location: shiftToCover.location,
+      start: shiftToCover.start,
+      end: shiftToCover.end,
+      hours: shiftHours
+    },
+    templateMatch: templateMatch.match !== 'none' ? {
+      matchType: templateMatch.match,
+      position: templateMatch.template.position,
+      slot: `${templateMatch.template.startTime}-${templateMatch.template.endTime}`,
+      frequency: `${templateMatch.template.count}x in last 4 weeks`,
+      dayType: templateMatch.template.dayType
+    } : null,
+    candidates
+  };
+}
+
+// GET /coverage/:day/:employee — Who can cover a shift
+app.get('/coverage/:day/:employee', async (req, res) => {
+  try {
+    const result = await findCoverage(req.params.day, req.params.employee);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /timeoff — Get time-off requests
 app.get('/timeoff', async (req, res) => {
   try {
@@ -1027,6 +1455,11 @@ function parseScheduleQuestion(text) {
   // "who's unavailable [day]?" or "who's off [day]?" or "unavailable [day]"
   const unavailMatch = lower.match(/(?:who(?:'s|s|\sis)\s+(?:unavailable|off|on\s+leave|out)|unavailab|time\s*off|who\s+can(?:'t|not)\s+work)\s*(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|this weekend|this week)?/i);
   
+  // "who can cover [name] on [day]?" or "cover for [name] [day]" or "find coverage [name] [day]"
+  const coverageMatch = lower.match(/(?:who\s+can\s+cover|cover\s+(?:for\s+)?|find\s+coverage\s+(?:for\s+)?|replace\s+|sub\s+(?:for\s+)?)(\w+)\s+(?:on\s+|for\s+)?(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday)/i)
+    || lower.match(/(?:who\s+can\s+cover|cover\s+(?:for\s+)?|find\s+coverage\s+(?:for\s+)?|replace\s+|sub\s+(?:for\s+)?)(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+(?:for\s+)?(\w+)/i)
+    || lower.match(/coverage\s+(?:for\s+)?(\w+)\s+(?:on\s+)?(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday)/i);
+  
   // "who's working [day]?" or "who works [day]?"
   const whosWorkingMatch = lower.match(/who(?:'s|s|\sis)\s+(?:working|on|scheduled)?\s*(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|this weekend|next week)?/i);
   
@@ -1046,7 +1479,22 @@ function parseScheduleQuestion(text) {
   // Extract the day
   let targetDay = null;
   
-  // Check unavailability first
+  // Check coverage first
+  if (coverageMatch) {
+    // Figure out which capture group has name vs day
+    let name, day;
+    const g1 = coverageMatch[1].toLowerCase();
+    const g2 = coverageMatch[2].toLowerCase();
+    const dayWords = ['today','tomorrow','sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
+    if (dayWords.includes(g1)) {
+      day = g1; name = g2;
+    } else {
+      name = g1; day = g2;
+    }
+    return { type: 'coverage', employee: name, day: day };
+  }
+  
+  // Check unavailability
   if (unavailMatch) {
     targetDay = (unavailMatch[1] || 'today').toLowerCase().trim();
     if (targetDay === 'this week') return { type: 'unavailable_week' };
@@ -1076,6 +1524,59 @@ function parseScheduleQuestion(text) {
 
 // Handle a parsed schedule question and return response text
 async function handleScheduleQuestion(parsed) {
+  if (parsed.type === 'coverage') {
+    const result = await findCoverage(parsed.day, parsed.employee);
+    
+    if (result.error) return `❌ ${result.error}`;
+    
+    const shift = result.shiftToCover;
+    const ctx = result.dayContext;
+    const st = new Date(shift.start).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
+    const et = new Date(shift.end).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
+    
+    let text = `🔄 *Coverage for ${shift.employee}'s shift on ${result.date}*\n`;
+    text += `Shift: *${shift.position || 'TBD'}* — ${st} to ${et} (${shift.hours.toFixed(1)}hrs)\n`;
+    text += `${ctx.dayName} | Store ${ctx.storeHours} (shifts ${ctx.shiftWindow})`;
+    if (ctx.isPeak) text += ` | ⚡ Peak day (~$${ctx.avgRevenue}/day, ~${ctx.avgTickets} tickets)`;
+    text += `\n`;
+    if (result.templateMatch) {
+      const tm = result.templateMatch;
+      text += `📋 Standard slot: ${tm.position} ${tm.slot} (${tm.frequency})\n`;
+    } else {
+      text += `⚠️ Non-standard shift time — not a regular template slot\n`;
+    }
+    text += `\n`;
+    
+    const available = result.candidates.filter(c => c.available);
+    const warned = result.candidates.filter(c => c.available && c.warnings.length > 0);
+    const unavailable = result.candidates.filter(c => !c.available);
+    
+    if (available.length > 0) {
+      text += `✅ *Can Cover (${available.length})*\n`;
+      for (const c of available) {
+        text += `  • *${c.employee}*`;
+        const info = [];
+        if (c.historicalAvg) info.push(`avg ${c.historicalAvg.toFixed(0)}hrs/wk`);
+        info.push(`${c.weeklyHours.toFixed(1)}→${c.projectedHours.toFixed(1)}hrs this week`);
+        text += ` — ${info.join(', ')}`;
+        if (c.warnings.length > 0) text += `\n    ⚠️ ${c.warnings.join('; ')}`;
+        text += '\n';
+      }
+      text += '\n';
+    } else {
+      text += `⚠️ *No one is available to cover this shift.*\n\n`;
+    }
+    
+    if (unavailable.length > 0) {
+      text += `🚫 *Cannot Cover (${unavailable.length})*\n`;
+      for (const c of unavailable) {
+        text += `  • ${c.employee} — ${c.reasons.join('; ')}\n`;
+      }
+    }
+    
+    return text;
+  }
+
   if (parsed.type === 'unavailable' || parsed.type === 'unavailable_week') {
     let startDate, endDate, label;
     
@@ -1247,7 +1748,7 @@ app.post('/slack/events', async (req, res) => {
       // If in DM, give a helpful hint. In channel, stay quiet for non-schedule messages.
       if (isDM) {
         await replyInSlack(event.channel, event.ts, 
-          `Hey! Ask me about the schedule. Try:\n• "Who's working today?"\n• "Who's off this week?"\n• "Saturday schedule"\n• "This week"\n• "Weekend"\n• "Who's unavailable Friday?"`
+          `Hey! Ask me about the schedule. Try:\n• "Who's working today?"\n• "Who's off this week?"\n• "Saturday schedule"\n• "This week"\n• "Weekend"\n• "Who's unavailable Friday?"\n• "Who can cover Jessica on Friday?"`
         );
       }
       return;
