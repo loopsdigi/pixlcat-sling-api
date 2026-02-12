@@ -2459,56 +2459,205 @@ app.post('/slack/events', async (req, res) => {
   const channel = event.channel;
   const threadTs = event.ts;
 
+  console.log(`[events] Received message: "${text}"`);
+
+  // --- Helper: detect which day the user means ---
+  function detectDay(input) {
+    if (/tomorrow|tmrw|tmr/.test(input)) return 'tomorrow';
+    if (/today|now/.test(input)) return 'today';
+    if (/monday|tuesday|wednesday|thursday|friday|saturday|sunday/.test(input)) {
+      return input.match(/monday|tuesday|wednesday|thursday|friday|saturday|sunday/)[0];
+    }
+    // Bare "schedule" or "who's working" with no day => today
+    return 'today';
+  }
+
   try {
-    // Schedule today
-    if (text.includes('schedule today') || text === 'today') {
-      const { start, end, dateFormatted } = getDayRange('today');
-      const { shifts } = await getOrgCalendar(start, end);
-      const { text: fallback, blocks } = formatScheduleBlocks(dateFormatted, shifts);
-      await replyInSlack(channel, threadTs, fallback, blocks);
-
-    // Schedule tomorrow
-    } else if (text.includes('schedule tomorrow') || text === 'tomorrow') {
-      const { start, end, dateFormatted } = getDayRange('tomorrow');
-      const { shifts } = await getOrgCalendar(start, end);
-      const { text: fallback, blocks } = formatScheduleBlocks(dateFormatted, shifts);
-      await replyInSlack(channel, threadTs, fallback, blocks);
-
-    // Who's working
-    } else if (text.match(/who(?:'s| is) working/)) {
-      const dateMatch = text.match(/working\s+(\w+)/);
-      const date = dateMatch ? dateMatch[1] : 'today';
-      const { start, end, dateFormatted } = getDayRange(date);
-      const { shifts } = await getOrgCalendar(start, end);
-      const working = shifts.filter((s) => s.employeeId);
-      const { text: fallback, blocks } = formatWhosWorkingBlocks(dateFormatted, working);
-      await replyInSlack(channel, threadTs, fallback, blocks);
-
-    // Conflicts
-    } else if (text.includes('conflict')) {
+    // --- CONFLICTS (check before schedule since "schedule conflicts" has both words) ---
+    // Matches: "conflicts", "find conflicts", "schedule conflicts", "any conflicts"
+    if (/conflict/.test(text)) {
       const confRes = await fetch(`http://127.0.0.1:${PORT}/conflicts?days=7`);
       const conflicts = await confRes.json();
 
       if (conflicts.conflictCount === 0) {
-        await replyInSlack(channel, threadTs, '✅ No schedule conflicts found for the next 7 days.');
+        await replyInSlack(channel, threadTs, 'No schedule conflicts found for the next 7 days.');
       } else {
         const { text: fallback, blocks } = formatConflictBlocks(conflicts.conflicts, conflicts.period);
         await replyInSlack(channel, threadTs, fallback, blocks);
       }
+      console.log(`[events] Posted conflicts`);
 
-    // Hours for employee
-    } else if (text.match(/hours\s+(?:for\s+)?(\w+)/)) {
-      const match = text.match(/hours\s+(?:for\s+)?(\w+)/);
-      const uid = resolveEmployeeId(match[1]);
-      if (uid) {
-        const hoursRes = await fetch(`http://127.0.0.1:${PORT}/weekly-hours/${uid}`);
-        const data = await hoursRes.json();
-        const { text: fallback, blocks } = formatHoursBlocks(data);
-        await replyInSlack(channel, threadTs, fallback, blocks);
+    // --- WHO'S OFF / UNAVAILABLE ---
+    // Matches: "who's off", "who's unavailable", "who is off tomorrow"
+    } else if (/who(?:'?s| is)\s+(?:off|unavailable|not working|not scheduled)/.test(text)) {
+      const day = detectDay(text);
+      const { start, end, dateFormatted } = getDayRange(day);
+      const { shifts } = await getOrgCalendar(start, end);
+      const workingIds = new Set(shifts.filter((s) => s.employeeId).map((s) => s.employeeId));
+
+      // Get all active employees
+      const usersRes = await fetch(`http://127.0.0.1:${PORT}/users`);
+      const allUsers = await usersRes.json();
+      const active = (allUsers.users || allUsers).filter((u) => u.active !== false);
+      const off = active.filter((u) => !workingIds.has(u.id));
+      const offNames = off.map((u) => u.name || u.legalName || `ID:${u.id}`);
+
+      const offText = `*Off on ${dateFormatted}:* ${offNames.length} employees\n${offNames.map((n) => '  - ' + n).join('\n')}`;
+      await replyInSlack(channel, threadTs, offText);
+      console.log(`[events] Posted who's off for ${day}`);
+
+    // --- WHO'S WORKING ---
+    // Matches: "who's working", "who is working today", "whos working tomorrow",
+    //          "who works today", "who's on today", "who's in tomorrow"
+    } else if (/who(?:'?s| is| works)\s+(?:working|on|in|scheduled)/.test(text)) {
+      const day = detectDay(text);
+      const { start, end, dateFormatted } = getDayRange(day);
+      const { shifts } = await getOrgCalendar(start, end);
+      const working = shifts.filter((s) => s.employeeId);
+      const { text: fallback, blocks } = formatWhosWorkingBlocks(dateFormatted, working);
+      await replyInSlack(channel, threadTs, fallback, blocks);
+      console.log(`[events] Posted who's working for ${day}`);
+
+    // --- HOURS ---
+    // Matches: "hours for jessica", "jessica's hours", "hours jessica"
+    } else if (/hours/.test(text)) {
+      const match = text.match(/hours\s+(?:for\s+)?(\w+)/) || text.match(/(\w+)(?:'s|s)\s+hours/);
+      if (match) {
+        const uid = resolveEmployeeId(match[1]);
+        if (uid) {
+          const hoursRes = await fetch(`http://127.0.0.1:${PORT}/weekly-hours/${uid}`);
+          const data = await hoursRes.json();
+          const { text: fallback, blocks } = formatHoursBlocks(data);
+          await replyInSlack(channel, threadTs, fallback, blocks);
+          console.log(`[events] Posted hours for ${match[1]}`);
+        }
       }
+
+    // --- COVERAGE ---
+    // Matches: "if jessica needs coverage", "coverage for tomorrow", "who can cover",
+    //          "cover for hayden", "hayden needs coverage tomorrow", "hayden can't work tomorrow"
+    } else if (/cover|needs?\s+(?:a\s+)?sub|can'?t\s+(?:make|come|work)|call(?:s|ed)?\s*(?:out|in|off)|replace/.test(text)) {
+      // Try to extract employee name and day — order matters, most specific first
+      const empMatch = text.match(/(\w+)\s+needs?\s+cover/) ||
+                       text.match(/(\w+)\s+needs?\s+(?:a\s+)?sub/) ||
+                       text.match(/(\w+)\s+(?:calls?\s*(?:out|in|off)|called\s*(?:out|in|off))/) ||
+                       text.match(/(\w+)\s+can'?t\s+(?:make|come|work)/) ||
+                       text.match(/(?:cover(?:age)?|replace|sub)\s+(?:for\s+)?(\w+)/) ||
+                       text.match(/(?:who\s+can\s+cover)\s+(\w+)/) ||
+                       text.match(/(?:if\s+)(\w+)\s+/);
+      const day = detectDay(text);
+      if (empMatch) {
+        const emp = empMatch[2] || empMatch[1]; // capture group varies by regex
+        const result = await findCoverage(day, emp);
+
+        if (result.error) {
+          await replyInSlack(channel, threadTs, `Could not find coverage: ${result.error}`);
+        } else {
+          const shift = result.shiftToCover;
+          const st = fmtTimePT(shift.start);
+          const et = fmtTimePT(shift.end);
+          const avail = result.candidates.filter((c) => c.available);
+          const unavail = result.candidates.filter((c) => !c.available);
+
+          const blocks = [
+            { type: 'header', text: { type: 'plain_text', text: `Coverage Needed: ${shift.employee}`, emoji: true } },
+            { type: 'section', fields: [
+              { type: 'mrkdwn', text: `*Position:*\n${shift.position || 'TBD'}` },
+              { type: 'mrkdwn', text: `*Shift:*\n${st} - ${et} (${shift.hours.toFixed(1)}hrs)` },
+              { type: 'mrkdwn', text: `*Date:*\n${result.date}` },
+              { type: 'mrkdwn', text: `*Location:*\n${shift.location || 'Clement'}` },
+            ]},
+            { type: 'divider' },
+          ];
+
+          if (avail.length > 0) {
+            const availLines = avail.map((c) => {
+              let line = `*${c.employee}* - ${c.weeklyHours.toFixed(1)}hrs this wk`;
+              if (c.warnings.length > 0) line += ` _(${c.warnings[0]})_`;
+              return line;
+            });
+            blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*Available (${avail.length}):*\n${availLines.join('\n')}` } });
+          } else {
+            blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '*No fully available candidates.* Check unavailable list for partial options.' } });
+          }
+
+          if (unavail.length > 0) {
+            const unavailLines = unavail.slice(0, 5).map((c) => {
+              return `~${c.employee}~ - ${c.reasons[0]}`;
+            });
+            blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*Unavailable (${unavail.length}):*\n${unavailLines.join('\n')}` } });
+          }
+
+          if (result.dayContext) {
+            const ctx = result.dayContext;
+            blocks.push({ type: 'context', elements: [
+              { type: 'mrkdwn', text: `${ctx.dayName} | Store ${ctx.storeHours}${ctx.isPeak ? ' | *Peak day*' : ''} | Avg $${ctx.avgRevenue || '?'}` }
+            ]});
+          }
+
+          const fallback = `Coverage for ${shift.employee} (${shift.position}) ${st}-${et} on ${result.date}: ${avail.length} available, ${unavail.length} unavailable`;
+          await replyInSlack(channel, threadTs, fallback, blocks);
+        }
+        console.log(`[events] Posted coverage for ${emp} on ${day}`);
+      } else {
+        await replyInSlack(channel, threadTs, 'Who needs coverage? Try: "cover for Hayden tomorrow" or "Jessica can\'t work Friday"');
+      }
+
+    // --- WEEK (check before schedule since "this week" or "week schedule" has schedule) ---
+    // Matches: "this week", "week schedule", "weekly schedule", "week"
+    } else if (/week/.test(text)) {
+      const now = new Date();
+      const startOfWeek = new Date(now);
+      startOfWeek.setDate(now.getDate() - now.getDay());
+      startOfWeek.setHours(0, 0, 0, 0);
+      const endOfWeek = new Date(startOfWeek);
+      endOfWeek.setDate(startOfWeek.getDate() + 6);
+      endOfWeek.setHours(23, 59, 59, 999);
+
+      const { shifts } = await getOrgCalendar(startOfWeek.toISOString(), endOfWeek.toISOString());
+
+      const dayMap = {};
+      for (let i = 0; i < 7; i++) {
+        const d = new Date(startOfWeek);
+        d.setDate(startOfWeek.getDate() + i);
+        const key = d.toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+        dayMap[key] = {
+          dateFormatted: d.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/Los_Angeles' }),
+          shifts: [],
+          isWeekend: [0, 6].includes(d.getDay()),
+        };
+      }
+      for (const s of shifts) {
+        const key = new Date(s.start).toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+        if (dayMap[key]) dayMap[key].shifts.push(s);
+      }
+      const daySchedules = Object.values(dayMap);
+      const weekLabel = `Week of ${daySchedules[0].dateFormatted} - ${daySchedules[6].dateFormatted}`;
+      const { text: fallback, blocks } = formatWeekBlocks(weekLabel, daySchedules);
+      await replyInSlack(channel, threadTs, fallback, blocks);
+      console.log(`[events] Posted week schedule`);
+
+    // --- SCHEDULE (today/tomorrow/day) — catch-all for schedule-related queries ---
+    // Matches: "schedule", "schedule today", "tomorrow's schedule", "tomorrows schedule",
+    //          "what's the schedule", "whats tomorrow look like", bare "today"/"tomorrow"
+    } else if (/schedule|what(?:'?s)?\s+(?:the\s+)?(?:\w+\s+)?(?:look|sched)/.test(text) ||
+        text === 'today' || text === 'tomorrow' || text === 'tmr' || text === 'tmrw') {
+      const day = detectDay(text);
+      const { start, end, dateFormatted } = getDayRange(day);
+      const { shifts } = await getOrgCalendar(start, end);
+      const { text: fallback, blocks } = formatScheduleBlocks(dateFormatted, shifts);
+      await replyInSlack(channel, threadTs, fallback, blocks);
+      console.log(`[events] Posted schedule for ${day}`);
+
+    } else {
+      console.log(`[events] No pattern match for: "${text}"`);
     }
   } catch (err) {
     console.error('Slack event handler error:', err.message);
+    // Try to notify the channel about the error
+    try {
+      await replyInSlack(channel, threadTs, `Error processing request: ${err.message}`);
+    } catch (_) {}
   }
 });
 
