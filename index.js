@@ -73,6 +73,18 @@ function findPositionByName(positions, name) {
   return positions.find(p => (p.name || '').toLowerCase().includes(lower));
 }
 
+// Helper: get org ID from session (cached)
+let _cachedOrgId = null;
+async function getOrgId() {
+  if (_cachedOrgId) return _cachedOrgId;
+  const session = await slingGet('/account/session');
+  if (session && session.org && session.org.id) {
+    _cachedOrgId = session.org.id;
+    return _cachedOrgId;
+  }
+  throw new Error('Could not determine org ID from session');
+}
+
 // Helper: parse a date string to ISO range for a given day
 function getDayRange(dateStr) {
   // Accept: "tuesday", "2025-02-11", "tomorrow", "today", etc.
@@ -233,14 +245,7 @@ app.get('/shifts/today', async (req, res) => {
     const { start, end, dateFormatted } = getDayRange('today');
     const dates = `${start}/${end}`;
     const users = await slingGet('/users');
-    let orgId;
-    for (const u of users) {
-      if (u.org && (u.org.id || typeof u.org === 'number')) {
-        orgId = u.org.id || u.org;
-        break;
-      }
-    }
-    if (!orgId) throw new Error('Could not determine org ID');
+    const orgId = await getOrgId();
     const data = await slingGet(`/${orgId}/calendar?dates=${encodeURIComponent(dates)}`);
 
     // Parse into readable format
@@ -278,14 +283,7 @@ app.get('/shifts/week', async (req, res) => {
 
     const dates = `${startOfWeek.toISOString()}/${endOfWeek.toISOString()}`;
     const users = await slingGet('/users');
-    let orgId;
-    for (const u of users) {
-      if (u.org && (u.org.id || typeof u.org === 'number')) {
-        orgId = u.org.id || u.org;
-        break;
-      }
-    }
-    if (!orgId) throw new Error('Could not determine org ID');
+    const orgId = await getOrgId();
     const data = await slingGet(`/${orgId}/calendar?dates=${encodeURIComponent(dates)}`);
 
     const shifts = (Array.isArray(data) ? data : [])
@@ -327,13 +325,7 @@ app.get('/schedule/:date', async (req, res) => {
     const { start, end, dateFormatted } = getDayRange(req.params.date);
     const dates = `${start}/${end}`;
     const users = await slingGet('/users');
-    let orgId;
-    for (const u of users) {
-      if (u.org && (u.org.id || typeof u.org === 'number')) {
-        orgId = u.org.id || u.org;
-        break;
-      }
-    }
+    const orgId = await getOrgId();
     const data = await slingGet(`/${orgId}/calendar?dates=${encodeURIComponent(dates)}`);
 
     const shifts = (Array.isArray(data) ? data : [])
@@ -372,13 +364,7 @@ app.get('/whos-working/:date', async (req, res) => {
     const { start, end, dateFormatted } = getDayRange(req.params.date);
     const dates = `${start}/${end}`;
     const users = await slingGet('/users');
-    let orgId;
-    for (const u of users) {
-      if (u.org && (u.org.id || typeof u.org === 'number')) {
-        orgId = u.org.id || u.org;
-        break;
-      }
-    }
+    const orgId = await getOrgId();
     const data = await slingGet(`/${orgId}/calendar?dates=${encodeURIComponent(dates)}`);
 
     const working = (Array.isArray(data) ? data : [])
@@ -518,13 +504,7 @@ app.post('/shifts/swap', async (req, res) => {
       const { start, end } = getDayRange(date);
       const dates = `${start}/${end}`;
 
-      let orgId;
-      for (const u of users) {
-        if (u.org && (u.org.id || typeof u.org === 'number')) {
-          orgId = u.org.id || u.org;
-          break;
-        }
-      }
+      const orgId = await getOrgId();
 
       const calData = await slingGet(`/${orgId}/calendar?dates=${encodeURIComponent(dates)}`);
       const shifts = (Array.isArray(calData) ? calData : [])
@@ -583,13 +563,7 @@ app.post('/shifts/assign', async (req, res) => {
     const user = findUserByName(users, employee);
     if (!user) return res.status(404).json({ error: `Employee "${employee}" not found` });
 
-    let orgId;
-    for (const u of users) {
-      if (u.org && (u.org.id || typeof u.org === 'number')) {
-        orgId = u.org.id || u.org;
-        break;
-      }
-    }
+    const orgId = await getOrgId();
 
     const { start, end, dateFormatted } = getDayRange(date);
     const dates = `${start}/${end}`;
@@ -704,10 +678,7 @@ app.post('/command', async (req, res) => {
       const { start, end, dateFormatted } = getDayRange(date);
       const dates = `${start}/${end}`;
       const users = await slingGet('/users');
-      let orgId;
-      for (const u of users) {
-        if (u.org && (u.org.id || typeof u.org === 'number')) { orgId = u.org.id || u.org; break; }
-      }
+      const orgId = await getOrgId();
       const calData = await slingGet(`/${orgId}/calendar?dates=${encodeURIComponent(dates)}`);
       const working = (Array.isArray(calData) ? calData : [])
         .filter(s => s.type === 'shift' && s.user)
