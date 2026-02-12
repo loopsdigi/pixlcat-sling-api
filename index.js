@@ -1,13 +1,43 @@
 const express = require(‘express’);
 const cors = require(‘cors’);
 const fetch = require(‘node-fetch’);
+const crypto = require(‘crypto’);
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({
+verify: (req, res, buf) => { req.rawBody = buf; }
+}));
 
 const SLING_BASE = ‘https://api.getsling.com’;
 const SLING_TOKEN = process.env.SLING_TOKEN;
+const API_KEY = process.env.API_KEY;
+const SLACK_SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET;
+
+// ============================================================
+// AUTH MIDDLEWARE
+// ============================================================
+
+function requireApiKey(req, res, next) {
+if (!API_KEY) return res.status(500).json({ error: ‘API_KEY not configured’ });
+const provided = req.headers[‘x-api-key’] || (req.headers.authorization || ‘’).replace(/^Bearer\s+/i, ‘’);
+if (provided !== API_KEY) return res.status(401).json({ error: ‘Unauthorized’ });
+next();
+}
+
+function verifySlackSignature(req) {
+if (!SLACK_SIGNING_SECRET) return false;
+const timestamp = req.headers[‘x-slack-request-timestamp’];
+const sig = req.headers[‘x-slack-signature’];
+if (!timestamp || !sig) return false;
+const ts = parseInt(timestamp, 10);
+if (!Number.isFinite(ts) || Math.abs(Date.now() / 1000 - ts) > 300) return false;
+const base = ‘v0:’ + timestamp + ‘:’ + (req.rawBody ? req.rawBody.toString(‘utf8’) : ‘’);
+const hmac = crypto.createHmac(‘sha256’, SLACK_SIGNING_SECRET).update(base).digest(‘hex’);
+const expected = ‘v0=’ + hmac;
+try { return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(sig)); }
+catch { return false; }
+}
 
 // ============================================================
 // SCHEDULING ENGINE CONSTANTS (v2.0)
@@ -316,8 +346,7 @@ endpoints: {
 ‘GET /slack/week’: ‘Post week schedule to Slack’,
 ‘GET /cron/daily’: ‘External cron endpoint’,
 ‘POST /slack/events’: ‘Slack Events API handler’,
-‘POST /command’: ‘Natural language processor’,
-‘POST /auth/login’: ‘Get auth token’
+‘POST /command’: ‘Natural language processor (API key required)’,
 }
 });
 });
@@ -631,7 +660,7 @@ catch (err) { res.status(500).json({ error: err.message }); }
 // WRITE ENDPOINTS
 // ============================================================
 
-app.post(’/shifts/create’, async (req, res) => {
+app.post(’/shifts/create’, requireApiKey, async (req, res) => {
 try {
 const { employee, position, location, date, startTime, endTime, publish } = req.body;
 const users = await slingGet(’/users’);
@@ -657,7 +686,7 @@ res.json({ success: true, message: `Shift created for ${employee||'unassigned'} 
 } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.post(’/shifts/swap’, async (req, res) => {
+app.post(’/shifts/swap’, requireApiKey, async (req, res) => {
 try {
 const { currentEmployee, newEmployee, date, shiftId } = req.body;
 const users = await slingGet(’/users’);
@@ -680,7 +709,7 @@ res.json({ success: true, message: `Swapped ${currentEmployee} -> ${newEmployee}
 } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.post(’/shifts/assign’, async (req, res) => {
+app.post(’/shifts/assign’, requireApiKey, async (req, res) => {
 try {
 const { employee, position, date, startTime, endTime, publish } = req.body;
 const users = await slingGet(’/users’);
@@ -710,17 +739,17 @@ res.json({ success: true, message: `Created shift for ${employee} on ${dateForma
 } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.put(’/shifts/:id’, async (req, res) => {
+app.put(’/shifts/:id’, requireApiKey, async (req, res) => {
 try { const result = await slingPut(`/shifts/${req.params.id}`, req.body); res.json({ success: true, result }); }
 catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.delete(’/shifts/:id’, async (req, res) => {
+app.delete(’/shifts/:id’, requireApiKey, async (req, res) => {
 try { const result = await slingDelete(`/shifts/${req.params.id}`); res.json({ success: true, message: `Shift ${req.params.id} deleted`, result }); }
 catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.post(’/shifts/publish’, async (req, res) => {
+app.post(’/shifts/publish’, requireApiKey, async (req, res) => {
 try {
 const { start, end } = req.body;
 if (!start||!end) return res.status(400).json({ error: ‘start and end required’ });
@@ -729,7 +758,7 @@ res.json({ success: true, message: `Published shifts ${start} to ${end}`, result
 } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.post(’/shifts/unpublish’, async (req, res) => {
+app.post(’/shifts/unpublish’, requireApiKey, async (req, res) => {
 try { const { shiftIds } = req.body; const result = await slingPost(’/shifts/unpublish’, shiftIds||[]); res.json({ success: true, result }); }
 catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -872,7 +901,7 @@ res.json({ employee:empName, employeeId:userId, centerDate:toISODatePT(centerDat
 });
 
 // POST /schedule/validate
-app.post(’/schedule/validate’, async (req, res) => {
+app.post(’/schedule/validate’, requireApiKey, async (req, res) => {
 try {
 const { employeeId, employee, date, startTime, endTime, location } = req.body;
 let userId = employeeId ? parseInt(employeeId) : resolveEmployeeId(employee);
@@ -941,7 +970,7 @@ res.json({ status, employee:empName, employeeId:userId, date:isoDate, proposedSh
 });
 
 // POST /cron/check-conflicts
-app.post(’/cron/check-conflicts’, async (req, res) => {
+app.post(’/cron/check-conflicts’, requireApiKey, async (req, res) => {
 try {
 const confRes = await fetch(`http://localhost:${PORT}/conflicts?days=7`);
 const conflicts = await confRes.json();
@@ -957,7 +986,7 @@ res.json({ message:`Alerted ${conflicts.conflictCount} conflicts`, alerted:!!sla
 // NATURAL LANGUAGE COMMAND PROCESSOR
 // ============================================================
 
-app.post(’/command’, async (req, res) => {
+app.post(’/command’, requireApiKey, async (req, res) => {
 try {
 const { command } = req.body;
 if (!command) return res.status(400).json({ error: ‘command field required’ });
@@ -1020,21 +1049,6 @@ if (consecMatch) {
 return res.json({ error:'Could not parse command', hint:'Try: "who\'s working today", "validate Sara for Monday", "hours for Jessica", "conflicts", "coverage tomorrow", "consecutive Sara"', rawCommand:command });
 ```
 
-} catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// ============================================================
-// AUTH
-// ============================================================
-
-app.post(’/auth/login’, async (req, res) => {
-try {
-const { email, password } = req.body;
-const loginRes = await fetch(`${SLING_BASE}/account/login`, { method:‘POST’, headers:{‘Content-Type’:‘application/json’}, body:JSON.stringify({email,password}) });
-if (!loginRes.ok) { const text = await loginRes.text(); return res.status(loginRes.status).json({ error: `Login failed: ${text}` }); }
-const token = loginRes.headers.get(‘authorization’);
-const body = await loginRes.json();
-res.json({ success:true, token, user:body, note:‘Set this token as SLING_TOKEN environment variable on Render’ });
 } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -1155,7 +1169,10 @@ res.json({ success:true, message:‘Posted week schedule to Slack’, slackResul
 // ============================================================
 
 app.post(’/slack/events’, async (req, res) => {
+// Allow url_verification without signature (needed for initial Slack setup)
 if (req.body.type === ‘url_verification’) return res.json({ challenge: req.body.challenge });
+// Verify Slack signature on all other requests
+if (!verifySlackSignature(req)) return res.status(401).send(‘invalid signature’);
 res.status(200).send(‘ok’);
 
 const event = req.body.event;
