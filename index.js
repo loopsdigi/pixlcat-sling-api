@@ -133,7 +133,39 @@ async function getOrgCalendar(dateStart, dateEnd) {
       };
     });
 
-  return { shifts, userMap, posMap, locMap };
+  // Enrich leave / time-off
+  const leaves = (Array.isArray(calData) ? calData : [])
+    .filter(s => s.type === 'leave')
+    .map(s => {
+      const user = s.user ? userMap[s.user.id] : null;
+      return {
+        id: s.id,
+        employee: user ? `${user.name || ''} ${user.lname || ''}`.trim() : 'Unknown',
+        employeeId: s.user ? s.user.id : null,
+        start: s.dtstart,
+        end: s.dtend,
+        fullDay: s.fullDay,
+        note: s.summary || '',
+        approved: s.approved ? true : false
+      };
+    });
+
+  // Enrich availability windows (when staff marked available — outside = unavailable)
+  const availability = (Array.isArray(calData) ? calData : [])
+    .filter(s => s.type === 'availability')
+    .map(s => {
+      const user = s.user ? userMap[s.user.id] : null;
+      return {
+        id: s.id,
+        employee: user ? `${user.name || ''} ${user.lname || ''}`.trim() : 'Unknown',
+        employeeId: s.user ? s.user.id : null,
+        start: s.dtstart,
+        end: s.dtend,
+        fullDay: s.fullDay
+      };
+    });
+
+  return { shifts, leaves, availability, userMap, posMap, locMap };
 }
 
 // Helper: parse a date string to ISO range for a given day
@@ -366,6 +398,36 @@ app.get('/whos-working/:date', async (req, res) => {
       end: s.end
     }));
     res.json({ date: dateFormatted, working });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /unavailable/:date — Who's unavailable / on leave for a given day
+app.get('/unavailable/:date', async (req, res) => {
+  try {
+    const { start, end, dateFormatted } = getDayRange(req.params.date);
+    const { leaves, availability, shifts } = await getOrgCalendar(start, end);
+    
+    // People on leave
+    const onLeave = leaves.map(l => ({
+      employee: l.employee,
+      type: 'leave',
+      fullDay: l.fullDay,
+      start: l.start,
+      end: l.end,
+      note: l.note
+    }));
+    
+    // People with limited availability (partial day only)
+    const limited = availability.filter(a => !a.fullDay).map(a => ({
+      employee: a.employee,
+      type: 'limited',
+      availableFrom: a.start,
+      availableTo: a.end
+    }));
+    
+    res.json({ date: dateFormatted, onLeave, limitedAvailability: limited });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -962,6 +1024,9 @@ function parseScheduleQuestion(text) {
   
   const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
   
+  // "who's unavailable [day]?" or "who's off [day]?" or "unavailable [day]"
+  const unavailMatch = lower.match(/(?:who(?:'s|s|\sis)\s+(?:unavailable|off|on\s+leave|out)|unavailab|time\s*off|who\s+can(?:'t|not)\s+work)\s*(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|this weekend|this week)?/i);
+  
   // "who's working [day]?" or "who works [day]?"
   const whosWorkingMatch = lower.match(/who(?:'s|s|\sis)\s+(?:working|on|scheduled)?\s*(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|this weekend|next week)?/i);
   
@@ -980,6 +1045,14 @@ function parseScheduleQuestion(text) {
   
   // Extract the day
   let targetDay = null;
+  
+  // Check unavailability first
+  if (unavailMatch) {
+    targetDay = (unavailMatch[1] || 'today').toLowerCase().trim();
+    if (targetDay === 'this week') return { type: 'unavailable_week' };
+    return { type: 'unavailable', day: targetDay };
+  }
+  
   const match = whosWorkingMatch || scheduleMatch || whatsMatch;
   if (match) {
     targetDay = (match[1] || 'today').toLowerCase().trim();
@@ -1003,6 +1076,69 @@ function parseScheduleQuestion(text) {
 
 // Handle a parsed schedule question and return response text
 async function handleScheduleQuestion(parsed) {
+  if (parsed.type === 'unavailable' || parsed.type === 'unavailable_week') {
+    let startDate, endDate, label;
+    
+    if (parsed.type === 'unavailable_week') {
+      const now = new Date();
+      const startOfWeek = new Date(now);
+      startOfWeek.setDate(now.getDate() - now.getDay());
+      startOfWeek.setHours(0, 0, 0, 0);
+      const endOfWeek = new Date(startOfWeek);
+      endOfWeek.setDate(startOfWeek.getDate() + 6);
+      endOfWeek.setHours(23, 59, 59, 999);
+      startDate = startOfWeek.toISOString();
+      endDate = endOfWeek.toISOString();
+      label = 'This Week';
+    } else {
+      const range = getDayRange(parsed.day);
+      startDate = range.start;
+      endDate = range.end;
+      label = range.dateFormatted;
+    }
+    
+    const { leaves, availability, shifts } = await getOrgCalendar(startDate, endDate);
+    
+    let text = `🚫 *Unavailability for ${label}*\n\n`;
+    
+    // Time off / Leave
+    if (leaves.length > 0) {
+      text += `*On Leave / Time Off*\n`;
+      // Deduplicate by employee
+      const seen = new Set();
+      for (const l of leaves) {
+        const key = `${l.employeeId}-${l.start}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const startDay = new Date(l.start).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/Los_Angeles' });
+        const endDay = new Date(l.end).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/Los_Angeles' });
+        const dateRange = l.fullDay ? (startDay === endDay ? startDay : `${startDay} – ${endDay}`) : `${startDay}`;
+        const note = l.note ? ` — _${l.note}_` : '';
+        text += `  • ${l.employee} (${dateRange})${note}\n`;
+      }
+      text += '\n';
+    }
+    
+    // Limited availability
+    const limited = availability.filter(a => !a.fullDay);
+    if (limited.length > 0) {
+      text += `*Limited Availability*\n`;
+      for (const a of limited) {
+        const st = new Date(a.start).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
+        const et = new Date(a.end).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
+        const day = new Date(a.start).toLocaleDateString('en-US', { weekday: 'short', timeZone: 'America/Los_Angeles' });
+        text += `  • ${a.employee} — only available ${st}-${et}` + (parsed.type === 'unavailable_week' ? ` (${day})` : '') + `\n`;
+      }
+      text += '\n';
+    }
+    
+    if (leaves.length === 0 && limited.length === 0) {
+      text += `_Everyone is available!_ ✅\n`;
+    }
+    
+    return text;
+  }
+
   if (parsed.type === 'week') {
     const now = new Date();
     const startOfWeek = new Date(now);
@@ -1111,7 +1247,7 @@ app.post('/slack/events', async (req, res) => {
       // If in DM, give a helpful hint. In channel, stay quiet for non-schedule messages.
       if (isDM) {
         await replyInSlack(event.channel, event.ts, 
-          `Hey! Ask me about the schedule. Try:\n• "Who's working today?"\n• "Saturday schedule"\n• "This week"\n• "Weekend"`
+          `Hey! Ask me about the schedule. Try:\n• "Who's working today?"\n• "Who's off this week?"\n• "Saturday schedule"\n• "This week"\n• "Weekend"\n• "Who's unavailable Friday?"`
         );
       }
       return;
