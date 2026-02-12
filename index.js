@@ -21,6 +21,7 @@ const express = require('express');
 const crypto = require('crypto');
 const cors = require('cors');
 const { handleWithClaude } = require('./claude-nlp');
+const { handleOpsQuery } = require('./claude-ops');
 
 // Node 18+ has global fetch. For older Node, install node-fetch and uncomment:
 // const fetch = global.fetch || require('node-fetch');
@@ -1972,6 +1973,7 @@ app.post('/command', async (req, res) => {
 // ============================================================
 
 const SLACK_CHANNEL = 'C0AELGYN2LC';
+const OPS_CHANNEL = 'C0AEKJ5UFE0';
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
 
 let _lastPostedDate = null;
@@ -2470,6 +2472,22 @@ app.post('/slack/events', async (req, res) => {
 
   const event = req.body.event;
   if (!event || event.type !== 'message' || event.bot_id || event.subtype) return;
+
+  // Route ops channel messages to Claude analytics
+  if (event.channel === OPS_CHANNEL) {
+    const opsText = (event.text || '').trim();
+    console.log(`[ops] Received message: "${opsText}"`);
+    try {
+      const handled = await handleOpsQuery(opsText, event.channel, event.ts);
+      if (!handled) {
+        console.log('[ops] Claude did not respond');
+      }
+    } catch (err) {
+      console.error('[ops] Error:', err.message);
+    }
+    return;
+  }
+
   if (event.channel !== SLACK_CHANNEL) return;
 
   const text = (event.text || '').toLowerCase().trim();
