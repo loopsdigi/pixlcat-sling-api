@@ -1,1820 +1,1215 @@
-const express = require('express');
-const cors = require('cors');
-const fetch = require('node-fetch');
+const express = require(‘express’);
+const cors = require(‘cors’);
+const fetch = require(‘node-fetch’);
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const SLING_BASE = 'https://api.getsling.com';
+const SLING_BASE = ‘https://api.getsling.com’;
 const SLING_TOKEN = process.env.SLING_TOKEN;
+
+// ============================================================
+// SCHEDULING ENGINE CONSTANTS (v2.0)
+// ============================================================
+
+const LOCATIONS = {
+CLEMENT: 16124319,
+NINTH: 16128300
+};
+
+const LOCATION_NAMES = {
+[LOCATIONS.CLEMENT]: ‘Clement Pixlcat’,
+[LOCATIONS.NINTH]: ‘9th st Pixlcat’
+};
+
+const EMPLOYEE_IDS = {
+JESUS: 16159503, JESSICA: 22563123, CLAYTON: 22635995,
+BRIANNA: 21868029, HAYDEN: 19838518, SAIGE: 16764426,
+EMILY: 24605713, OTILIA: 24950241, MAYA_M: 24950518,
+MAYA_L: 13125426, SARA: 24949126, ANYA: 16422126,
+JAMES: 19506789, DAVID: 12302285, JEFFREY: 19763164
+};
+
+const EMPLOYEE_NAMES = {
+[EMPLOYEE_IDS.JESUS]: ‘Jesus’, [EMPLOYEE_IDS.JESSICA]: ‘Jessica’,
+[EMPLOYEE_IDS.CLAYTON]: ‘Clayton’, [EMPLOYEE_IDS.BRIANNA]: ‘Brianna’,
+[EMPLOYEE_IDS.HAYDEN]: ‘Hayden’, [EMPLOYEE_IDS.SAIGE]: ‘Saige’,
+[EMPLOYEE_IDS.EMILY]: ‘Emily’, [EMPLOYEE_IDS.OTILIA]: ‘Otilia’,
+[EMPLOYEE_IDS.MAYA_M]: ‘Maya M’, [EMPLOYEE_IDS.MAYA_L]: ‘Maya L’,
+[EMPLOYEE_IDS.SARA]: ‘Sara’, [EMPLOYEE_IDS.ANYA]: ‘Anya’,
+[EMPLOYEE_IDS.JAMES]: ‘James’, [EMPLOYEE_IDS.DAVID]: ‘David’,
+[EMPLOYEE_IDS.JEFFREY]: ‘Jeffrey’
+};
+
+const CROSS_LOCATION_POOL = [
+EMPLOYEE_IDS.SARA, EMPLOYEE_IDS.BRIANNA, EMPLOYEE_IDS.JAMES,
+EMPLOYEE_IDS.EMILY, EMPLOYEE_IDS.CLAYTON, EMPLOYEE_IDS.DAVID
+];
+
+const MAX_WEEKLY_HOURS = 40;
+const MAX_CONSECUTIVE_DAYS = 7;
+const WARN_CONSECUTIVE_DAYS = 6;
+
+const COVERAGE_MINS = {
+CLEMENT_WEEKDAY: 2, CLEMENT_WEEKEND: 2,
+NINTH_WEEKDAY: 1, NINTH_WEEKEND: 2
+};
 
 // ============================================================
 // HELPERS
 // ============================================================
 
 async function slingGet(path, token) {
-  const authToken = token || SLING_TOKEN;
-  if (!authToken) throw new Error('No Sling auth token configured');
-  const res = await fetch(`${SLING_BASE}${path}`, {
-    headers: { 'Authorization': authToken, 'Content-Type': 'application/json' }
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Sling API ${res.status}: ${text}`);
-  }
-  return res.json();
+const authToken = token || SLING_TOKEN;
+if (!authToken) throw new Error(‘No Sling auth token configured’);
+const res = await fetch(`${SLING_BASE}${path}`, {
+headers: { ‘Authorization’: authToken, ‘Content-Type’: ‘application/json’ }
+});
+if (!res.ok) {
+const text = await res.text();
+throw new Error(`Sling API ${res.status}: ${text}`);
+}
+return res.json();
 }
 
 async function slingPost(path, body, token) {
-  const authToken = token || SLING_TOKEN;
-  if (!authToken) throw new Error('No Sling auth token configured');
-  const res = await fetch(`${SLING_BASE}${path}`, {
-    method: 'POST',
-    headers: { 'Authorization': authToken, 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Sling API ${res.status}: ${text}`);
-  }
-  return res.json();
+const authToken = token || SLING_TOKEN;
+if (!authToken) throw new Error(‘No Sling auth token configured’);
+const res = await fetch(`${SLING_BASE}${path}`, {
+method: ‘POST’,
+headers: { ‘Authorization’: authToken, ‘Content-Type’: ‘application/json’ },
+body: JSON.stringify(body)
+});
+if (!res.ok) {
+const text = await res.text();
+throw new Error(`Sling API ${res.status}: ${text}`);
+}
+return res.json();
 }
 
 async function slingPut(path, body, token) {
-  const authToken = token || SLING_TOKEN;
-  if (!authToken) throw new Error('No Sling auth token configured');
-  const res = await fetch(`${SLING_BASE}${path}`, {
-    method: 'PUT',
-    headers: { 'Authorization': authToken, 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Sling API ${res.status}: ${text}`);
-  }
-  return res.json();
+const authToken = token || SLING_TOKEN;
+if (!authToken) throw new Error(‘No Sling auth token configured’);
+const res = await fetch(`${SLING_BASE}${path}`, {
+method: ‘PUT’,
+headers: { ‘Authorization’: authToken, ‘Content-Type’: ‘application/json’ },
+body: JSON.stringify(body)
+});
+if (!res.ok) {
+const text = await res.text();
+throw new Error(`Sling API ${res.status}: ${text}`);
+}
+return res.json();
 }
 
-// Helper: find user by name (case-insensitive partial match)
+async function slingDelete(path, token) {
+const authToken = token || SLING_TOKEN;
+if (!authToken) throw new Error(‘No Sling auth token configured’);
+const res = await fetch(`${SLING_BASE}${path}`, {
+method: ‘DELETE’,
+headers: { ‘Authorization’: authToken, ‘Content-Type’: ‘application/json’ }
+});
+if (!res.ok) {
+const text = await res.text();
+throw new Error(`Sling API ${res.status}: ${text}`);
+}
+const text = await res.text();
+return text ? JSON.parse(text) : { success: true };
+}
+
 function findUserByName(users, name) {
-  const lower = name.toLowerCase().trim();
-  return users.find(u => {
-    const fullName = `${u.name || ''} ${u.lname || ''}`.toLowerCase();
-    const firstName = (u.name || '').toLowerCase();
-    const lastName = (u.lname || '').toLowerCase();
-    return firstName === lower || lastName === lower || fullName.includes(lower);
-  });
+const lower = name.toLowerCase().trim();
+return users.find(u => {
+const fullName = `${u.name || ''} ${u.lname || ''}`.toLowerCase();
+const firstName = (u.name || ‘’).toLowerCase();
+const lastName = (u.lname || ‘’).toLowerCase();
+return firstName === lower || lastName === lower || fullName.includes(lower);
+});
 }
 
-// Helper: find position by name
 function findPositionByName(positions, name) {
-  const lower = name.toLowerCase().trim();
-  return positions.find(p => (p.name || '').toLowerCase().includes(lower));
+const lower = name.toLowerCase().trim();
+return positions.find(p => (p.name || ‘’).toLowerCase().includes(lower));
 }
 
-// Helper: get org ID and admin user ID from session (cached)
+function resolveEmployeeId(nameOrId) {
+if (typeof nameOrId === ‘number’) return nameOrId;
+if (typeof nameOrId === ‘string’ && !isNaN(nameOrId)) return parseInt(nameOrId);
+const lower = nameOrId.toLowerCase().trim();
+const match = Object.entries(EMPLOYEE_NAMES).find(([, name]) => name.toLowerCase() === lower);
+return match ? parseInt(match[0]) : null;
+}
+
 let _cachedSession = null;
 async function getSessionInfo() {
-  if (_cachedSession) return _cachedSession;
-  const session = await slingGet('/account/session');
-  if (session && session.org && session.org.id) {
-    _cachedSession = {
-      orgId: session.org.id,
-      userId: session.user.id,
-      memberGroupId: session.org.memberGroupId
-    };
-    return _cachedSession;
-  }
-  throw new Error('Could not determine session info');
+if (_cachedSession) return _cachedSession;
+const session = await slingGet(’/account/session’);
+if (session && session.org && session.org.id) {
+_cachedSession = {
+orgId: session.org.id,
+userId: session.user.id,
+memberGroupId: session.org.memberGroupId
+};
+return _cachedSession;
+}
+throw new Error(‘Could not determine session info’);
 }
 async function getOrgId() {
-  const s = await getSessionInfo();
-  return s.orgId;
+const s = await getSessionInfo();
+return s.orgId;
 }
 
-// Helper: get org-wide calendar events for a date range
-// Returns shifts enriched with user/position/location names
 async function getOrgCalendar(dateStart, dateEnd) {
-  const { orgId, userId } = await getSessionInfo();
-  const dates = `${dateStart}/${dateEnd}`;
-  const [calData, users, positions, locations] = await Promise.all([
-    slingGet(`/${orgId}/calendar/${userId}?dates=${encodeURIComponent(dates)}`),
-    slingGet('/users'),
-    slingGet('/groups').then(g => g.filter(x => x.type === 'position')),
-    slingGet('/groups').then(g => g.filter(x => x.type === 'location'))
-  ]);
+const { orgId, userId } = await getSessionInfo();
+const dates = `${dateStart}/${dateEnd}`;
+const [calData, users, positions, locations] = await Promise.all([
+slingGet(`/${orgId}/calendar/${userId}?dates=${encodeURIComponent(dates)}`),
+slingGet(’/users’),
+slingGet(’/groups’).then(g => g.filter(x => x.type === ‘position’)),
+slingGet(’/groups’).then(g => g.filter(x => x.type === ‘location’))
+]);
 
-  // Build lookup maps
-  const userMap = {};
-  users.forEach(u => { userMap[u.id] = u; });
-  const posMap = {};
-  positions.forEach(p => { posMap[p.id] = p; });
-  const locMap = {};
-  locations.forEach(l => { locMap[l.id] = l; });
+const userMap = {};
+users.forEach(u => { userMap[u.id] = u; });
+const posMap = {};
+positions.forEach(p => { posMap[p.id] = p; });
+const locMap = {};
+locations.forEach(l => { locMap[l.id] = l; });
 
-  // Enrich shifts
-  const shifts = (Array.isArray(calData) ? calData : [])
-    .filter(s => s.type === 'shift')
-    .map(s => {
-      const user = s.user ? userMap[s.user.id] : null;
-      const pos = s.position ? posMap[s.position.id] : null;
-      const loc = s.location ? locMap[s.location.id] : null;
-      return {
-        id: s.id,
-        employee: user ? `${user.name || ''} ${user.lname || ''}`.trim() : 'Unassigned',
-        employeeId: s.user ? s.user.id : null,
-        position: pos ? pos.name : null,
-        location: loc ? loc.name : null,
-        start: s.dtstart,
-        end: s.dtend,
-        status: s.status,
-        published: s.status === 'published'
-      };
-    });
+const shifts = (Array.isArray(calData) ? calData : [])
+.filter(s => s.type === ‘shift’)
+.map(s => {
+const user = s.user ? userMap[s.user.id] : null;
+const pos = s.position ? posMap[s.position.id] : null;
+const loc = s.location ? locMap[s.location.id] : null;
+return {
+id: s.id,
+employee: user ? `${user.name || ''} ${user.lname || ''}`.trim() : ‘Unassigned’,
+employeeId: s.user ? s.user.id : null,
+position: pos ? pos.name : null,
+positionId: s.position ? s.position.id : null,
+location: loc ? loc.name : null,
+locationId: s.location ? s.location.id : null,
+start: s.dtstart,
+end: s.dtend,
+duration: (new Date(s.dtend) - new Date(s.dtstart)) / (1000 * 60 * 60),
+status: s.status,
+published: s.status === ‘published’,
+breakDuration: s.breakDuration || 0
+};
+});
 
-  // Enrich leave / time-off
-  const leaves = (Array.isArray(calData) ? calData : [])
-    .filter(s => s.type === 'leave')
-    .map(s => {
-      const user = s.user ? userMap[s.user.id] : null;
-      return {
-        id: s.id,
-        employee: user ? `${user.name || ''} ${user.lname || ''}`.trim() : 'Unknown',
-        employeeId: s.user ? s.user.id : null,
-        start: s.dtstart,
-        end: s.dtend,
-        fullDay: s.fullDay,
-        note: s.summary || '',
-        approved: s.approved ? true : false
-      };
-    });
+const leaves = (Array.isArray(calData) ? calData : [])
+.filter(s => s.type === ‘leave’)
+.map(s => {
+const user = s.user ? userMap[s.user.id] : null;
+return {
+id: s.id,
+employee: user ? `${user.name || ''} ${user.lname || ''}`.trim() : ‘Unknown’,
+employeeId: s.user ? s.user.id : null,
+start: s.dtstart, end: s.dtend, fullDay: s.fullDay,
+note: s.summary || ‘’, approved: s.approved ? true : false
+};
+});
 
-  // Enrich availability windows (when staff marked available — outside = unavailable)
-  const availability = (Array.isArray(calData) ? calData : [])
-    .filter(s => s.type === 'availability')
-    .map(s => {
-      const user = s.user ? userMap[s.user.id] : null;
-      return {
-        id: s.id,
-        employee: user ? `${user.name || ''} ${user.lname || ''}`.trim() : 'Unknown',
-        employeeId: s.user ? s.user.id : null,
-        start: s.dtstart,
-        end: s.dtend,
-        fullDay: s.fullDay
-      };
-    });
+const availability = (Array.isArray(calData) ? calData : [])
+.filter(s => s.type === ‘availability’)
+.map(s => {
+const user = s.user ? userMap[s.user.id] : null;
+return {
+id: s.id,
+employee: user ? `${user.name || ''} ${user.lname || ''}`.trim() : ‘Unknown’,
+employeeId: s.user ? s.user.id : null,
+start: s.dtstart, end: s.dtend, fullDay: s.fullDay
+};
+});
 
-  return { shifts, leaves, availability, userMap, posMap, locMap };
+return { shifts, leaves, availability, userMap, posMap, locMap };
 }
 
-// Helper: parse a date string to ISO range for a given day
 function getDayRange(dateStr) {
-  // Accept: "tuesday", "2025-02-11", "tomorrow", "today", etc.
-  const now = new Date();
-  let target;
+const now = new Date();
+let target;
+const days = [‘sunday’, ‘monday’, ‘tuesday’, ‘wednesday’, ‘thursday’, ‘friday’, ‘saturday’];
+const dayIdx = days.indexOf(dateStr.toLowerCase());
 
-  const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-  const dayIdx = days.indexOf(dateStr.toLowerCase());
+if (dateStr.toLowerCase() === ‘today’) { target = now; }
+else if (dateStr.toLowerCase() === ‘tomorrow’) { target = new Date(now); target.setDate(target.getDate() + 1); }
+else if (dateStr.toLowerCase() === ‘yesterday’) { target = new Date(now); target.setDate(target.getDate() - 1); }
+else if (dayIdx !== -1) { target = new Date(now); const diff = dayIdx - target.getDay(); target.setDate(target.getDate() + (diff <= 0 ? diff + 7 : diff)); }
+else { target = new Date(dateStr); }
 
-  if (dateStr.toLowerCase() === 'today') {
-    target = now;
-  } else if (dateStr.toLowerCase() === 'tomorrow') {
-    target = new Date(now);
-    target.setDate(target.getDate() + 1);
-  } else if (dayIdx !== -1) {
-    target = new Date(now);
-    const currentDay = target.getDay();
-    let diff = dayIdx - currentDay;
-    if (diff <= 0) diff += 7; // next occurrence
-    target.setDate(target.getDate() + diff);
-  } else {
-    target = new Date(dateStr);
-  }
+const start = new Date(target); start.setHours(0, 0, 0, 0);
+const end = new Date(target); end.setHours(23, 59, 59, 999);
 
-  const start = new Date(target);
-  start.setHours(0, 0, 0, 0);
-  const end = new Date(target);
-  end.setHours(23, 59, 59, 999);
+return {
+start: start.toISOString(), end: end.toISOString(),
+dateFormatted: start.toLocaleDateString(‘en-US’, { weekday: ‘long’, month: ‘short’, day: ‘numeric’, year: ‘numeric’ }),
+isoDate: start.toISOString().slice(0, 10),
+dayOfWeek: start.getDay(),
+isWeekend: start.getDay() === 0 || start.getDay() === 6
+};
+}
 
-  return {
-    start: start.toISOString(),
-    end: end.toISOString(),
-    dateFormatted: start.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', year: 'numeric' })
-  };
+function toISODatePT(d) { return d.toLocaleDateString(‘en-CA’, { timeZone: ‘America/Los_Angeles’ }); }
+function formatTimePT(d) { return new Date(d).toLocaleTimeString(‘en-US’, { hour: ‘numeric’, minute: ‘2-digit’, timeZone: ‘America/Los_Angeles’ }); }
+
+function getWeekRange(dateStr) {
+const d = dateStr ? new Date(getDayRange(dateStr).start) : new Date();
+const day = d.getDay();
+const monday = new Date(d);
+monday.setDate(d.getDate() - (day === 0 ? 6 : day - 1));
+monday.setHours(0, 0, 0, 0);
+const sunday = new Date(monday);
+sunday.setDate(monday.getDate() + 6);
+sunday.setHours(23, 59, 59, 999);
+return { start: monday.toISOString(), end: sunday.toISOString() };
+}
+
+function getWeekKey(date) {
+const d = new Date(date);
+d.setDate(d.getDate() - d.getDay());
+return d.toISOString().slice(0, 10);
 }
 
 // ============================================================
-// HEALTH CHECK
+// HEALTH CHECK / ROOT
 // ============================================================
 
-app.get('/', (req, res) => {
-  res.json({
-    service: 'Pixlcat Sling API',
-    version: '1.0.0',
-    status: 'running',
-    endpoints: {
-      // READ
-      'GET /users': 'List all employees',
-      'GET /positions': 'List all positions',
-      'GET /locations': 'List all locations',
-      'GET /groups': 'List all groups',
-      'GET /shifts': 'Get shifts for a date range (?start=ISO&end=ISO)',
-      'GET /shifts/today': 'Get today\'s shifts',
-      'GET /shifts/week': 'Get this week\'s shifts',
-      'GET /schedule/:date': 'Get schedule for a specific day (YYYY-MM-DD or day name)',
-      'GET /whos-working': 'Who\'s working right now',
-      'GET /whos-working/:date': 'Who\'s working on a given day',
-      'GET /timeoff': 'Get pending/approved time-off requests',
-      'GET /calendar/summaries': 'Get hours/cost summaries',
-      // WRITE
-      'POST /shifts/create': 'Create a new shift',
-      'POST /shifts/swap': 'Swap one employee for another on a shift',
-      'POST /shifts/assign': 'Assign employee to a shift by name + date',
-      'PUT /shifts/:id': 'Update a shift directly',
-      'POST /shifts/publish': 'Publish shifts for a date range',
-      'POST /shifts/unpublish': 'Unpublish shifts',
-      // NATURAL LANGUAGE
-      'POST /command': 'Natural language command processor'
-    }
-  });
+app.get(’/’, (req, res) => {
+res.json({
+service: ‘Pixlcat Sling API’,
+version: ‘2.0.0’,
+status: ‘running’,
+endpoints: {
+‘GET /users’: ‘List all employees’,
+‘GET /positions’: ‘List all positions’,
+‘GET /locations’: ‘List all locations’,
+‘GET /groups’: ‘List all groups’,
+‘GET /shifts’: ‘Get shifts (?start=ISO&end=ISO)’,
+‘GET /shifts/today’: ‘Today shifts’,
+‘GET /shifts/week’: ‘This week shifts’,
+‘GET /schedule/:date’: ‘Schedule for a day’,
+‘GET /whos-working’: ‘Who is working now’,
+‘GET /whos-working/:date’: ‘Who is working on date’,
+‘GET /unavailable/:date’: ‘Who is unavailable’,
+‘GET /timeoff’: ‘Time-off requests’,
+‘GET /calendar/summaries’: ‘Hours/cost summaries’,
+‘GET /coverage/:day/:employee’: ‘Find coverage candidates’,
+‘POST /shifts/create’: ‘Create shift’,
+‘POST /shifts/swap’: ‘Swap employee on shift’,
+‘POST /shifts/assign’: ‘Assign employee to shift’,
+‘PUT /shifts/:id’: ‘Update shift’,
+‘DELETE /shifts/:id’: ‘Delete shift’,
+‘POST /shifts/publish’: ‘Publish shifts’,
+‘POST /shifts/unpublish’: ‘Unpublish shifts’,
+‘GET /conflicts’: ‘Schedule vs availability conflicts (?days=7)’,
+‘GET /weekly-hours/:userId’: ‘Cross-location weekly hours (?week=DATE)’,
+‘GET /availability/:date’: ‘All employee availability for date’,
+‘POST /schedule/validate’: ‘Validate assignment against rules’,
+‘GET /schedule/coverage/:date’: ‘Floor headcount by hour’,
+‘GET /schedule/consecutive/:userId’: ‘Consecutive day streak (?date=DATE)’,
+‘POST /cron/check-conflicts’: ‘Run conflict check + Slack alert’,
+‘GET /slack/daily’: ‘Post today schedule to Slack’,
+‘GET /slack/tomorrow’: ‘Post tomorrow schedule to Slack’,
+‘GET /slack/week’: ‘Post week schedule to Slack’,
+‘GET /cron/daily’: ‘External cron endpoint’,
+‘POST /slack/events’: ‘Slack Events API handler’,
+‘POST /command’: ‘Natural language processor’,
+‘POST /auth/login’: ‘Get auth token’
+}
+});
 });
 
 // ============================================================
 // READ ENDPOINTS
 // ============================================================
 
-// GET /users — List all employees
-app.get('/users', async (req, res) => {
-  try {
-    const data = await slingGet('/users');
-    const users = data.map(u => ({
-      id: u.id,
-      firstName: u.name,
-      lastName: u.lname,
-      fullName: `${u.name || ''} ${u.lname || ''}`.trim(),
-      email: u.email,
-      phone: u.phone,
-      avatar: u.avatar,
-      type: u.type, // admin, manager, employee
-      active: u.active,
-      timezone: u.timezone,
-      hourlyWage: u.hourlyWage
-    }));
-    res.json({ count: users.length, users });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+app.get(’/users’, async (req, res) => {
+try {
+const data = await slingGet(’/users’);
+const users = data.map(u => ({
+id: u.id, firstName: u.name, lastName: u.lname,
+fullName: `${u.name || ''} ${u.lname || ''}`.trim(),
+email: u.email, phone: u.phone, avatar: u.avatar,
+type: u.type, active: u.active, timezone: u.timezone, hourlyWage: u.hourlyWage
+}));
+res.json({ count: users.length, users });
+} catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// GET /positions — List all positions (barista, etc.)
-app.get('/positions', async (req, res) => {
-  try {
-    const data = await slingGet('/positions');
-    res.json({ count: data.length, positions: data });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+app.get(’/positions’, async (req, res) => {
+try { const data = await slingGet(’/positions’); res.json({ count: data.length, positions: data }); }
+catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// GET /locations — List all locations
-app.get('/locations', async (req, res) => {
-  try {
-    const data = await slingGet('/locations');
-    res.json({ count: data.length, locations: data });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+app.get(’/locations’, async (req, res) => {
+try { const data = await slingGet(’/locations’); res.json({ count: data.length, locations: data }); }
+catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// GET /groups — List all employee groups
-app.get('/groups', async (req, res) => {
-  try {
-    const data = await slingGet('/groups');
-    res.json({ count: data.length, groups: data });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+app.get(’/groups’, async (req, res) => {
+try { const data = await slingGet(’/groups’); res.json({ count: data.length, groups: data }); }
+catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// GET /shifts — Get shifts for date range
-// Query params: start (ISO), end (ISO), user_id (optional)
-app.get('/shifts', async (req, res) => {
-  try {
-    const { start, end, user_id } = req.query;
-    if (!start || !end) {
-      return res.status(400).json({ error: 'start and end query params required (ISO dates)' });
-    }
-    const dates = `${start}/${end}`;
-    let path = `/calendar/${user_id || ''}/shifts?dates=${encodeURIComponent(dates)}`;
-    if (!user_id) {
-      const { orgId, userId: adminId } = await getSessionInfo();
-      path = `/${orgId}/calendar/${adminId}?dates=${encodeURIComponent(dates)}`;
-    }
-    const data = await slingGet(path);
-    res.json(data);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+app.get(’/shifts’, async (req, res) => {
+try {
+const { start, end, user_id } = req.query;
+if (!start || !end) return res.status(400).json({ error: ‘start and end query params required (ISO dates)’ });
+const dates = `${start}/${end}`;
+let path;
+if (user_id) { path = `/calendar/${user_id}/shifts?dates=${encodeURIComponent(dates)}`; }
+else { const { orgId, userId: adminId } = await getSessionInfo(); path = `/${orgId}/calendar/${adminId}?dates=${encodeURIComponent(dates)}`; }
+const data = await slingGet(path);
+res.json(data);
+} catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// GET /shifts/today — Today's schedule
-app.get('/shifts/today', async (req, res) => {
-  try {
-    const { start, end, dateFormatted } = getDayRange('today');
-    const { shifts } = await getOrgCalendar(start, end);
-    res.json({ date: dateFormatted, count: shifts.length, shifts });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+app.get(’/shifts/today’, async (req, res) => {
+try {
+const { start, end, dateFormatted } = getDayRange(‘today’);
+const { shifts } = await getOrgCalendar(start, end);
+res.json({ date: dateFormatted, count: shifts.length, shifts });
+} catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// GET /shifts/week — This week's schedule
-app.get('/shifts/week', async (req, res) => {
-  try {
-    const now = new Date();
-    const startOfWeek = new Date(now);
-    startOfWeek.setDate(now.getDate() - now.getDay());
-    startOfWeek.setHours(0, 0, 0, 0);
-    const endOfWeek = new Date(startOfWeek);
-    endOfWeek.setDate(startOfWeek.getDate() + 6);
-    endOfWeek.setHours(23, 59, 59, 999);
-
-    const { shifts } = await getOrgCalendar(startOfWeek.toISOString(), endOfWeek.toISOString());
-    
-    // Add day name
-    const enriched = shifts.map(s => ({
-      ...s,
-      day: new Date(s.start).toLocaleDateString('en-US', { weekday: 'long' })
-    }));
-
-    const byDay = {};
-    enriched.forEach(s => {
-      if (!byDay[s.day]) byDay[s.day] = [];
-      byDay[s.day].push(s);
-    });
-
-    res.json({
-      weekOf: startOfWeek.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-      totalShifts: enriched.length,
-      byDay,
-      allShifts: enriched
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+app.get(’/shifts/week’, async (req, res) => {
+try {
+const now = new Date();
+const startOfWeek = new Date(now); startOfWeek.setDate(now.getDate() - now.getDay()); startOfWeek.setHours(0,0,0,0);
+const endOfWeek = new Date(startOfWeek); endOfWeek.setDate(startOfWeek.getDate() + 6); endOfWeek.setHours(23,59,59,999);
+const { shifts } = await getOrgCalendar(startOfWeek.toISOString(), endOfWeek.toISOString());
+const enriched = shifts.map(s => ({ …s, day: new Date(s.start).toLocaleDateString(‘en-US’, { weekday: ‘long’ }) }));
+const byDay = {};
+enriched.forEach(s => { if (!byDay[s.day]) byDay[s.day] = []; byDay[s.day].push(s); });
+res.json({ weekOf: startOfWeek.toLocaleDateString(‘en-US’, { month: ‘short’, day: ‘numeric’ }), totalShifts: enriched.length, byDay, allShifts: enriched });
+} catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// GET /schedule/:date — Get schedule for a specific day
-app.get('/schedule/:date', async (req, res) => {
-  try {
-    const { start, end, dateFormatted } = getDayRange(req.params.date);
-    const { shifts } = await getOrgCalendar(start, end);
-    res.json({ date: dateFormatted, count: shifts.length, shifts });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+app.get(’/schedule/:date’, async (req, res) => {
+try {
+const { start, end, dateFormatted } = getDayRange(req.params.date);
+const { shifts } = await getOrgCalendar(start, end);
+res.json({ date: dateFormatted, count: shifts.length, shifts });
+} catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// GET /whos-working — Who's working right now
-app.get('/whos-working', async (req, res) => {
-  try {
-    const data = await slingGet('/calendar/working');
-    res.json(data);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+app.get(’/whos-working’, async (req, res) => {
+try { const data = await slingGet(’/calendar/working’); res.json(data); }
+catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// GET /whos-working/:date — Who's working on a given day
-app.get('/whos-working/:date', async (req, res) => {
-  try {
-    const { start, end, dateFormatted } = getDayRange(req.params.date);
-    const { shifts } = await getOrgCalendar(start, end);
-    const working = shifts.filter(s => s.employeeId).map(s => ({
-      employee: s.employee,
-      position: s.position,
-      start: s.start,
-      end: s.end
-    }));
-    res.json({ date: dateFormatted, working });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+app.get(’/whos-working/:date’, async (req, res) => {
+try {
+const { start, end, dateFormatted } = getDayRange(req.params.date);
+const { shifts } = await getOrgCalendar(start, end);
+const working = shifts.filter(s => s.employeeId).map(s => ({
+employee: s.employee, position: s.position, location: s.location, start: s.start, end: s.end
+}));
+res.json({ date: dateFormatted, working });
+} catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// GET /unavailable/:date — Who's unavailable / on leave for a given day
-app.get('/unavailable/:date', async (req, res) => {
-  try {
-    const { start, end, dateFormatted } = getDayRange(req.params.date);
-    const { leaves, availability, shifts } = await getOrgCalendar(start, end);
-    
-    // People on leave
-    const onLeave = leaves.map(l => ({
-      employee: l.employee,
-      type: 'leave',
-      fullDay: l.fullDay,
-      start: l.start,
-      end: l.end,
-      note: l.note
-    }));
-    
-    // People with limited availability (partial day only)
-    const limited = availability.filter(a => !a.fullDay).map(a => ({
-      employee: a.employee,
-      type: 'limited',
-      availableFrom: a.start,
-      availableTo: a.end
-    }));
-    
-    res.json({ date: dateFormatted, onLeave, limitedAvailability: limited });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+app.get(’/unavailable/:date’, async (req, res) => {
+try {
+const { start, end, dateFormatted } = getDayRange(req.params.date);
+const { leaves, availability } = await getOrgCalendar(start, end);
+const onLeave = leaves.map(l => ({ employee: l.employee, employeeId: l.employeeId, type: ‘leave’, fullDay: l.fullDay, start: l.start, end: l.end, note: l.note }));
+const limited = availability.filter(a => !a.fullDay).map(a => ({ employee: a.employee, employeeId: a.employeeId, type: ‘limited’, availableFrom: a.start, availableTo: a.end }));
+res.json({ date: dateFormatted, onLeave, limitedAvailability: limited });
+} catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get(’/timeoff’, async (req, res) => {
+try { const data = await slingGet(’/leave/requests’); res.json(data); }
+catch (err) { try { const data = await slingGet(’/leave’); res.json(data); } catch (err2) { res.status(500).json({ error: err2.message }); } }
+});
+
+app.get(’/calendar/summaries’, async (req, res) => {
+try {
+const { start, end } = req.query;
+if (!start || !end) return res.status(400).json({ error: ‘start and end query params required’ });
+const data = await slingGet(`/calendar/summaries?dates=${encodeURIComponent(`${start}/${end}`)}`);
+res.json(data);
+} catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ============================================================
 // COVERAGE FINDER
-// Dynamically pulls from Sling: availability, leave, shift history
-// Factors in: Pixlcat hours, historical avg hours, sales patterns
-// Hard rules: 40hr/week max, no work when unavailable, 6 consecutive max
 // ============================================================
 
-// Pixlcat operating hours (customer-facing)
-// Shifts can start 30min before open (prep) and end up to 1hr after close (closing duties)
 const STORE_HOURS = {
-  0: { open: 7, close: 17, shiftEarliest: 6.5, shiftLatest: 18, label: 'Sunday' },
-  1: { open: 7, close: 16, shiftEarliest: 6.5, shiftLatest: 17, label: 'Monday' },
-  2: { open: 7, close: 16, shiftEarliest: 6.5, shiftLatest: 17, label: 'Tuesday' },
-  3: { open: 7, close: 16, shiftEarliest: 6.5, shiftLatest: 17, label: 'Wednesday' },
-  4: { open: 7, close: 16, shiftEarliest: 6.5, shiftLatest: 17, label: 'Thursday' },
-  5: { open: 7, close: 16, shiftEarliest: 6.5, shiftLatest: 17, label: 'Friday' },
-  6: { open: 7, close: 17, shiftEarliest: 6.5, shiftLatest: 18, label: 'Saturday' },
+0: { open: 7, close: 17, shiftEarliest: 6.5, shiftLatest: 18, label: ‘Sunday’ },
+1: { open: 7, close: 16, shiftEarliest: 6.5, shiftLatest: 17, label: ‘Monday’ },
+2: { open: 7, close: 16, shiftEarliest: 6.5, shiftLatest: 17, label: ‘Tuesday’ },
+3: { open: 7, close: 16, shiftEarliest: 6.5, shiftLatest: 17, label: ‘Wednesday’ },
+4: { open: 7, close: 16, shiftEarliest: 6.5, shiftLatest: 17, label: ‘Thursday’ },
+5: { open: 7, close: 16, shiftEarliest: 6.5, shiftLatest: 17, label: ‘Friday’ },
+6: { open: 7, close: 17, shiftEarliest: 6.5, shiftLatest: 18, label: ‘Saturday’ },
 };
 
-// Derive recurring shift slot templates from last 4 weeks of actual Sling schedules
-// This adapts automatically as scheduling patterns change
 async function getShiftTemplates() {
-  const now = new Date();
-  const fourWeeksAgo = new Date(now);
-  fourWeeksAgo.setDate(now.getDate() - 28);
-  fourWeeksAgo.setHours(0, 0, 0, 0);
-  
-  const { shifts } = await getOrgCalendar(fourWeeksAgo.toISOString(), now.toISOString());
-  const clementShifts = shifts.filter(s => (s.location || '').includes('Clement'));
-  
-  // Count occurrences of each position + time slot + day type
-  const slotCounts = {};
-  clementShifts.forEach(s => {
-    const st = new Date(s.start);
-    const et = new Date(s.end);
-    const isWeekend = st.getDay() === 0 || st.getDay() === 6;
-    const dayType = isWeekend ? 'weekend' : 'weekday';
-    const startHr = st.getHours() + st.getMinutes() / 60;
-    const endHr = et.getHours() + et.getMinutes() / 60;
-    const hrs = (et - st) / (1000 * 60 * 60);
-    const startTime = `${st.getHours()}:${String(st.getMinutes()).padStart(2, '0')}`;
-    const endTime = `${et.getHours()}:${String(et.getMinutes()).padStart(2, '0')}`;
-    const key = `${s.position || 'Unknown'}|${startTime}|${endTime}|${dayType}`;
-    
-    if (!slotCounts[key]) {
-      slotCounts[key] = {
-        position: s.position || 'Unknown',
-        startTime, endTime, startHr, endHr,
-        hours: hrs, dayType, count: 0
-      };
-    }
-    slotCounts[key].count++;
-  });
-  
-  // Sort by frequency — most common = standard templates
-  const templates = Object.values(slotCounts)
-    .filter(t => t.count >= 3) // Only patterns seen 3+ times
-    .sort((a, b) => b.count - a.count);
-  
-  return templates;
+const now = new Date();
+const fourWeeksAgo = new Date(now); fourWeeksAgo.setDate(now.getDate() - 28); fourWeeksAgo.setHours(0,0,0,0);
+const { shifts } = await getOrgCalendar(fourWeeksAgo.toISOString(), now.toISOString());
+const clementShifts = shifts.filter(s => (s.location || ‘’).includes(‘Clement’));
+const slotCounts = {};
+clementShifts.forEach(s => {
+const st = new Date(s.start); const et = new Date(s.end);
+const dayType = (st.getDay() === 0 || st.getDay() === 6) ? ‘weekend’ : ‘weekday’;
+const startTime = `${st.getHours()}:${String(st.getMinutes()).padStart(2,'0')}`;
+const endTime = `${et.getHours()}:${String(et.getMinutes()).padStart(2,'0')}`;
+const key = `${s.position||'Unknown'}|${startTime}|${endTime}|${dayType}`;
+if (!slotCounts[key]) slotCounts[key] = { position: s.position||‘Unknown’, startTime, endTime, hours: (et-st)/(1000*60*60), dayType, count: 0 };
+slotCounts[key].count++;
+});
+return Object.values(slotCounts).filter(t => t.count >= 3).sort((a,b) => b.count - a.count);
 }
 
-// Check if a coverage shift matches a known template slot
 function matchesTemplate(shiftToCover, templates) {
-  const st = new Date(shiftToCover.start);
-  const et = new Date(shiftToCover.end);
-  const isWeekend = st.getDay() === 0 || st.getDay() === 6;
-  const dayType = isWeekend ? 'weekend' : 'weekday';
-  const startTime = `${st.getHours()}:${String(st.getMinutes()).padStart(2, '0')}`;
-  const endTime = `${et.getHours()}:${String(et.getMinutes()).padStart(2, '0')}`;
-  
-  const exact = templates.find(t =>
-    t.position === shiftToCover.position &&
-    t.startTime === startTime &&
-    t.endTime === endTime &&
-    t.dayType === dayType
-  );
-  if (exact) return { match: 'exact', template: exact };
-  
-  // Check same position, same day type, any time
-  const posMatch = templates.find(t =>
-    t.position === shiftToCover.position &&
-    t.dayType === dayType
-  );
-  if (posMatch) return { match: 'position', template: posMatch };
-  
-  // Check same time slot, any position
-  const timeMatch = templates.find(t =>
-    t.startTime === startTime &&
-    t.endTime === endTime &&
-    t.dayType === dayType
-  );
-  if (timeMatch) return { match: 'time', template: timeMatch };
-  
-  return { match: 'none', template: null };
+const st = new Date(shiftToCover.start); const et = new Date(shiftToCover.end);
+const dayType = (st.getDay()===0||st.getDay()===6) ? ‘weekend’ : ‘weekday’;
+const startTime = `${st.getHours()}:${String(st.getMinutes()).padStart(2,'0')}`;
+const endTime = `${et.getHours()}:${String(et.getMinutes()).padStart(2,'0')}`;
+const exact = templates.find(t => t.position===shiftToCover.position && t.startTime===startTime && t.endTime===endTime && t.dayType===dayType);
+if (exact) return { match:‘exact’, template:exact };
+const posMatch = templates.find(t => t.position===shiftToCover.position && t.dayType===dayType);
+if (posMatch) return { match:‘position’, template:posMatch };
+const timeMatch = templates.find(t => t.startTime===startTime && t.endTime===endTime && t.dayType===dayType);
+if (timeMatch) return { match:‘time’, template:timeMatch };
+return { match:‘none’, template:null };
 }
 
-// Historical avg weekly hours (refreshed on each call from last 4 weeks)
 async function getHistoricalAvgHours() {
-  const now = new Date();
-  const fourWeeksAgo = new Date(now);
-  fourWeeksAgo.setDate(now.getDate() - 28);
-  fourWeeksAgo.setHours(0, 0, 0, 0);
-  
-  const { shifts } = await getOrgCalendar(fourWeeksAgo.toISOString(), now.toISOString());
-  
-  // Only Clement shifts
-  const clementShifts = shifts.filter(s => (s.location || '').includes('Clement'));
-  
-  // Group by employee by week
-  const byEmployee = {};
-  clementShifts.forEach(s => {
-    if (!s.employeeId) return;
-    if (!byEmployee[s.employeeId]) byEmployee[s.employeeId] = {};
-    const weekKey = getWeekKey(new Date(s.start));
-    if (!byEmployee[s.employeeId][weekKey]) byEmployee[s.employeeId][weekKey] = 0;
-    const hrs = (new Date(s.end) - new Date(s.start)) / (1000 * 60 * 60);
-    byEmployee[s.employeeId][weekKey] += hrs;
-  });
-  
-  // Calculate averages
-  const avgHours = {};
-  for (const [empId, weeks] of Object.entries(byEmployee)) {
-    const hrs = Object.values(weeks);
-    avgHours[empId] = {
-      avg: hrs.reduce((a, b) => a + b, 0) / hrs.length,
-      min: Math.min(...hrs),
-      max: Math.max(...hrs),
-      weeks: hrs.length
-    };
-  }
-  return avgHours;
+const now = new Date();
+const fourWeeksAgo = new Date(now); fourWeeksAgo.setDate(now.getDate()-28); fourWeeksAgo.setHours(0,0,0,0);
+const { shifts } = await getOrgCalendar(fourWeeksAgo.toISOString(), now.toISOString());
+const clementShifts = shifts.filter(s => (s.location||’’).includes(‘Clement’));
+const byEmployee = {};
+clementShifts.forEach(s => {
+if (!s.employeeId) return;
+if (!byEmployee[s.employeeId]) byEmployee[s.employeeId] = {};
+const wk = getWeekKey(new Date(s.start));
+if (!byEmployee[s.employeeId][wk]) byEmployee[s.employeeId][wk] = 0;
+byEmployee[s.employeeId][wk] += (new Date(s.end)-new Date(s.start))/(1000*60*60);
+});
+const avgHours = {};
+for (const [empId, weeks] of Object.entries(byEmployee)) {
+const hrs = Object.values(weeks);
+avgHours[empId] = { avg: hrs.reduce((a,b)=>a+b,0)/hrs.length, min: Math.min(…hrs), max: Math.max(…hrs), weeks: hrs.length };
+}
+return avgHours;
 }
 
-function getWeekKey(date) {
-  const d = new Date(date);
-  d.setDate(d.getDate() - d.getDay()); // Sunday
-  return d.toISOString().slice(0, 10);
-}
-
-// Fetch Toast sales data for a given day to assess shift importance
 async function getDaySalesContext(targetDate) {
-  try {
-    const dayOfWeek = targetDate.getDay();
-    const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
-    const dayName = STORE_HOURS[dayOfWeek].label;
-    
-    // Try Toast API for historical revenue
-    const toastRes = await fetch(`https://toast-api-1.onrender.com/api/sales/summary`);
-    if (toastRes.ok) {
-      const salesData = await toastRes.json();
-      return {
-        dayName,
-        isWeekend,
-        isPeak: isWeekend || dayOfWeek === 5, // Fri-Sun
-        storeHours: STORE_HOURS[dayOfWeek],
-        salesData: salesData
-      };
-    }
-  } catch (e) {
-    // Toast API unavailable, use known averages from memory
-  }
-  
-  const dayOfWeek = targetDate.getDay();
-  const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
-  return {
-    dayName: STORE_HOURS[dayOfWeek].label,
-    isWeekend,
-    isPeak: isWeekend || dayOfWeek === 5,
-    storeHours: STORE_HOURS[dayOfWeek],
-    avgRevenue: isWeekend ? 3610 : 1807,
-    avgTickets: isWeekend ? 292 : 169
-  };
+try {
+const dayOfWeek = targetDate.getDay();
+const toastRes = await fetch(‘https://toast-api-1.onrender.com/api/sales/summary’);
+if (toastRes.ok) {
+const salesData = await toastRes.json();
+return { dayName: STORE_HOURS[dayOfWeek].label, isWeekend: dayOfWeek===0||dayOfWeek===6, isPeak: dayOfWeek===0||dayOfWeek===5||dayOfWeek===6, storeHours: STORE_HOURS[dayOfWeek], salesData };
+}
+} catch(e) {}
+const dayOfWeek = targetDate.getDay();
+const isWeekend = dayOfWeek===0||dayOfWeek===6;
+return { dayName: STORE_HOURS[dayOfWeek].label, isWeekend, isPeak: isWeekend||dayOfWeek===5, storeHours: STORE_HOURS[dayOfWeek], avgRevenue: isWeekend?3610:1807, avgTickets: isWeekend?292:169 };
 }
 
 async function findCoverage(targetDay, targetEmployeeName) {
-  const { start, end, dateFormatted } = getDayRange(targetDay);
-  const targetDate = new Date(start);
-  
-  // Get the full week containing targetDay (Sun-Sat)
-  const weekStart = new Date(targetDate);
-  weekStart.setDate(targetDate.getDate() - targetDate.getDay());
-  weekStart.setHours(0, 0, 0, 0);
-  const weekEnd = new Date(weekStart);
-  weekEnd.setDate(weekStart.getDate() + 6);
-  weekEnd.setHours(23, 59, 59, 999);
-  
-  // Wider window for consecutive-shift check
-  const streakStart = new Date(targetDate);
-  streakStart.setDate(targetDate.getDate() - 6);
-  streakStart.setHours(0, 0, 0, 0);
-  const streakEnd = new Date(targetDate);
-  streakEnd.setDate(targetDate.getDate() + 6);
-  streakEnd.setHours(23, 59, 59, 999);
-  
-  // Fetch all data in parallel
-  const [weekData, streakData, allUsers, historicalAvg, salesContext, shiftTemplates] = await Promise.all([
-    getOrgCalendar(weekStart.toISOString(), weekEnd.toISOString()),
-    getOrgCalendar(streakStart.toISOString(), streakEnd.toISOString()),
-    slingGet('/users'),
-    getHistoricalAvgHours(),
-    getDaySalesContext(targetDate),
-    getShiftTemplates()
-  ]);
-  
-  const { shifts: weekShifts, leaves: weekLeaves, availability: weekAvail } = weekData;
-  const { shifts: streakShifts } = streakData;
-  
-  // Find the target shift to cover
-  const shiftDateStr = targetDate.toDateString();
-  const targetShifts = weekShifts.filter(s => {
-    const isTargetDate = new Date(s.start).toDateString() === shiftDateStr;
-    if (!targetEmployeeName) return isTargetDate;
-    return isTargetDate && s.employee.toLowerCase().includes(targetEmployeeName.toLowerCase());
-  });
-  
-  if (targetShifts.length === 0) {
-    return { error: `No shift found for ${targetEmployeeName || 'anyone'} on ${dateFormatted}` };
+const { start, end, dateFormatted } = getDayRange(targetDay);
+const targetDate = new Date(start);
+const weekStart = new Date(targetDate); weekStart.setDate(targetDate.getDate()-targetDate.getDay()); weekStart.setHours(0,0,0,0);
+const weekEnd = new Date(weekStart); weekEnd.setDate(weekStart.getDate()+6); weekEnd.setHours(23,59,59,999);
+const streakStart = new Date(targetDate); streakStart.setDate(targetDate.getDate()-6); streakStart.setHours(0,0,0,0);
+const streakEnd = new Date(targetDate); streakEnd.setDate(targetDate.getDate()+6); streakEnd.setHours(23,59,59,999);
+
+const [weekData, streakData, allUsers, historicalAvg, salesContext, shiftTemplates] = await Promise.all([
+getOrgCalendar(weekStart.toISOString(), weekEnd.toISOString()),
+getOrgCalendar(streakStart.toISOString(), streakEnd.toISOString()),
+slingGet(’/users’), getHistoricalAvgHours(), getDaySalesContext(targetDate), getShiftTemplates()
+]);
+
+const { shifts: weekShifts, leaves: weekLeaves, availability: weekAvail } = weekData;
+const { shifts: streakShifts } = streakData;
+const shiftDateStr = targetDate.toDateString();
+
+const targetShifts = weekShifts.filter(s => {
+const isTargetDate = new Date(s.start).toDateString() === shiftDateStr;
+if (!targetEmployeeName) return isTargetDate;
+return isTargetDate && s.employee.toLowerCase().includes(targetEmployeeName.toLowerCase());
+});
+if (targetShifts.length === 0) return { error: `No shift found for ${targetEmployeeName||'anyone'} on ${dateFormatted}` };
+
+const shiftToCover = targetShifts[0];
+const shiftHours = (new Date(shiftToCover.end)-new Date(shiftToCover.start))/(1000*60*60);
+
+const clementEmployeeIds = new Set();
+weekShifts.filter(s=>(s.location||’’).includes(‘Clement’)).forEach(s=>{ if(s.employeeId) clementEmployeeIds.add(s.employeeId); });
+streakShifts.filter(s=>(s.location||’’).includes(‘Clement’)).forEach(s=>{ if(s.employeeId) clementEmployeeIds.add(s.employeeId); });
+weekAvail.forEach(a=>{ if(a.employeeId) clementEmployeeIds.add(a.employeeId); });
+
+const candidates = [];
+for (const empId of clementEmployeeIds) {
+if (empId === shiftToCover.employeeId) continue;
+const user = allUsers.find(u=>u.id===empId);
+if (!user) continue;
+const empName = `${user.name||''} ${user.lname||''}`.trim();
+const reasons=[]; const warnings=[]; const notes=[];
+
+```
+// Already working?
+const alreadyWorking = weekShifts.filter(s=>s.employeeId===empId && new Date(s.start).toDateString()===shiftDateStr);
+if (alreadyWorking.length>0) {
+  const existing = alreadyWorking[0];
+  const st=formatTimePT(existing.start); const et=formatTimePT(existing.end);
+  if (new Date(existing.start)<new Date(shiftToCover.end) && new Date(existing.end)>new Date(shiftToCover.start)) reasons.push(`Already working ${st}-${et} (overlaps)`);
+  else warnings.push(`Already has a shift ${st}-${et} (no overlap — double possible)`);
+}
+// On leave?
+const onLeave = weekLeaves.some(l=>l.employeeId===empId && new Date(l.start)<=targetDate && new Date(l.end)>=targetDate);
+if (onLeave) { const leave=weekLeaves.find(l=>l.employeeId===empId && new Date(l.start)<=targetDate && new Date(l.end)>=targetDate); reasons.push(`On leave`+(leave&&leave.note?` — ${leave.note}`:'')); }
+// Availability?
+const dayAvail = weekAvail.filter(a=>a.employeeId===empId && new Date(a.start).toDateString()===shiftDateStr);
+if (dayAvail.length>0) {
+  const hasFullDay = dayAvail.some(a=>a.fullDay);
+  if (!hasFullDay) {
+    const fits = dayAvail.some(a=>new Date(shiftToCover.start)>=new Date(a.start) && new Date(shiftToCover.end)<=new Date(a.end));
+    if (!fits) { const windows=dayAvail.map(a=>`${formatTimePT(a.start)}-${formatTimePT(a.end)}`).join(', '); reasons.push(`Only available ${windows} (shift doesn't fit)`); }
+    else notes.push('Available window covers this shift');
   }
-  
-  const shiftToCover = targetShifts[0];
-  const shiftHours = (new Date(shiftToCover.end) - new Date(shiftToCover.start)) / (1000 * 60 * 60);
-  
-  // Build set of all Clement employees
-  const clementEmployeeIds = new Set();
-  weekShifts.filter(s => (s.location || '').includes('Clement')).forEach(s => {
-    if (s.employeeId) clementEmployeeIds.add(s.employeeId);
-  });
-  streakShifts.filter(s => (s.location || '').includes('Clement')).forEach(s => {
-    if (s.employeeId) clementEmployeeIds.add(s.employeeId);
-  });
-  // Also include anyone with availability set (they're on the team even if not scheduled this week)
-  weekAvail.forEach(a => { if (a.employeeId) clementEmployeeIds.add(a.employeeId); });
-  
-  const candidates = [];
-  
-  for (const empId of clementEmployeeIds) {
-    if (empId === shiftToCover.employeeId) continue;
-    
-    const user = allUsers.find(u => u.id === empId);
-    if (!user) continue;
-    const empName = `${user.name || ''} ${user.lname || ''}`.trim();
-    
-    const reasons = [];  // Why they CAN'T cover
-    const warnings = []; // Soft concerns
-    const notes = [];    // Neutral info
-    
-    // --- HARD RULE: Already working that day? ---
-    const alreadyWorking = weekShifts.filter(s =>
-      s.employeeId === empId && new Date(s.start).toDateString() === shiftDateStr
-    );
-    if (alreadyWorking.length > 0) {
-      const existing = alreadyWorking[0];
-      const st = new Date(existing.start).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
-      const et = new Date(existing.end).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
-      // Check if shifts overlap or if they could do a double
-      const existingEnd = new Date(existing.end);
-      const coverStart = new Date(shiftToCover.start);
-      const existingStart = new Date(existing.start);
-      const coverEnd = new Date(shiftToCover.end);
-      if (existingStart < coverEnd && existingEnd > coverStart) {
-        reasons.push(`Already working ${st}-${et} (overlaps)`);
-      } else {
-        warnings.push(`Already has a shift ${st}-${et} (no overlap — double possible)`);
-      }
-    }
-    
-    // --- HARD RULE: On leave that day? ---
-    const onLeave = weekLeaves.some(l =>
-      l.employeeId === empId &&
-      new Date(l.start) <= targetDate && new Date(l.end) >= targetDate
-    );
-    if (onLeave) {
-      const leave = weekLeaves.find(l => l.employeeId === empId && new Date(l.start) <= targetDate && new Date(l.end) >= targetDate);
-      reasons.push(`On leave` + (leave && leave.note ? ` — ${leave.note}` : ''));
-    }
-    
-    // --- HARD RULE: Unavailable per Sling availability? ---
-    const dayAvail = weekAvail.filter(a =>
-      a.employeeId === empId &&
-      new Date(a.start).toDateString() === shiftDateStr
-    );
-    // If they have availability entries for this day, check if shift fits
-    if (dayAvail.length > 0) {
-      const hasFullDay = dayAvail.some(a => a.fullDay);
-      if (!hasFullDay) {
-        const shiftStart = new Date(shiftToCover.start);
-        const shiftEnd = new Date(shiftToCover.end);
-        const fits = dayAvail.some(a => {
-          return shiftStart >= new Date(a.start) && shiftEnd <= new Date(a.end);
-        });
-        if (!fits) {
-          const windows = dayAvail.map(a => {
-            const st = new Date(a.start).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
-            const et = new Date(a.end).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
-            return `${st}-${et}`;
-          }).join(', ');
-          reasons.push(`Only available ${windows} (shift doesn't fit)`);
-        } else {
-          notes.push(`Available window covers this shift`);
-        }
-      }
-    } else {
-      // No availability set for this day = not available (Sling treats missing availability as unavailable)
-      // But only flag this if they have availability set for OTHER days (meaning they use the system)
-      const hasAnyAvail = weekAvail.some(a => a.employeeId === empId);
-      if (hasAnyAvail) {
-        reasons.push(`No availability set for ${STORE_HOURS[targetDate.getDay()].label}`);
-      }
-    }
-    
-    // --- HARD RULE: Would exceed 40 hours this week? ---
-    const weeklyShifts = weekShifts.filter(s => s.employeeId === empId);
-    let weeklyHours = 0;
-    weeklyShifts.forEach(s => {
-      weeklyHours += (new Date(s.end) - new Date(s.start)) / (1000 * 60 * 60);
-    });
-    const projectedHours = weeklyHours + shiftHours;
-    if (projectedHours > 40) {
-      reasons.push(`Would hit ${projectedHours.toFixed(1)}hrs (40hr max)`);
-    }
-    
-    // --- HARD RULE: Would exceed 6 consecutive shifts? ---
-    // 7+ consecutive = blocked. 6th shift = warning only.
-    const streakDatesWorked = new Set(
-      streakShifts.filter(s => s.employeeId === empId).map(s => new Date(s.start).toDateString())
-    );
-    streakDatesWorked.add(shiftDateStr); // Add coverage day
-    let maxConsecutive = 0, current = 0;
-    for (let d = new Date(streakStart); d <= streakEnd; d.setDate(d.getDate() + 1)) {
-      if (streakDatesWorked.has(d.toDateString())) {
-        current++;
-        maxConsecutive = Math.max(maxConsecutive, current);
-      } else {
-        current = 0;
-      }
-    }
-    if (maxConsecutive > 6) {
-      reasons.push(`Would be ${maxConsecutive} consecutive days (6 max)`);
-    } else if (maxConsecutive === 6) {
-      warnings.push(`⚡ This would be their 6th consecutive day`);
-    }
-    
-    // --- WARNING: 6th shift this week ---
-    const shiftsThisWeek = weekShifts.filter(s => s.employeeId === empId).length;
-    if (shiftsThisWeek + 1 === 6) {
-      warnings.push(`This would be their 6th shift this week`);
-    } else if (shiftsThisWeek + 1 > 6) {
-      warnings.push(`Would be shift #${shiftsThisWeek + 1} this week`);
-    }
-    
-    // --- SOFT: Historical hours comparison ---
-    const hist = historicalAvg[empId];
-    if (hist) {
-      const overAvg = projectedHours - hist.avg;
-      if (overAvg > 8) {
-        warnings.push(`${overAvg.toFixed(1)}hrs above their usual ${hist.avg.toFixed(1)}hrs/week`);
-      }
-      notes.push(`Usually ${hist.avg.toFixed(1)}hrs/wk (${hist.min.toFixed(0)}-${hist.max.toFixed(0)} range)`);
-    }
-    
-    // Weekly hours note
-    notes.push(`${weeklyHours.toFixed(1)}hrs this week → ${projectedHours.toFixed(1)}hrs if covering`);
-    
-    candidates.push({
-      employee: empName,
-      employeeId: empId,
-      available: reasons.length === 0,
-      reasons,
-      warnings,
-      notes,
-      weeklyHours,
-      projectedHours,
-      historicalAvg: hist ? hist.avg : null
-    });
-  }
-  
-  // Sort: available first, then by fewest projected hours (most capacity)
-  candidates.sort((a, b) => {
-    if (a.available && !b.available) return -1;
-    if (!a.available && b.available) return 1;
-    // Among available, prefer those with fewest hours this week
-    if (a.available && b.available) return a.projectedHours - b.projectedHours;
-    return 0;
-  });
-  
-  // Check if this shift matches a known Sling template
-  const templateMatch = matchesTemplate(shiftToCover, shiftTemplates);
-  
-  return {
-    date: dateFormatted,
-    dayContext: {
-      dayName: salesContext.dayName,
-      isPeak: salesContext.isPeak,
-      storeHours: `${salesContext.storeHours.open}AM-${salesContext.storeHours.close > 12 ? salesContext.storeHours.close - 12 + 'PM' : salesContext.storeHours.close + 'AM'}`,
-      shiftWindow: `${salesContext.storeHours.shiftEarliest % 1 === 0.5 ? Math.floor(salesContext.storeHours.shiftEarliest) + ':30AM' : salesContext.storeHours.shiftEarliest + 'AM'}-${salesContext.storeHours.shiftLatest > 12 ? salesContext.storeHours.shiftLatest - 12 + 'PM' : salesContext.storeHours.shiftLatest + 'AM'}`,
-      avgRevenue: salesContext.avgRevenue,
-      avgTickets: salesContext.avgTickets
-    },
-    shiftToCover: {
-      employee: shiftToCover.employee,
-      position: shiftToCover.position,
-      location: shiftToCover.location,
-      start: shiftToCover.start,
-      end: shiftToCover.end,
-      hours: shiftHours
-    },
-    templateMatch: templateMatch.match !== 'none' ? {
-      matchType: templateMatch.match,
-      position: templateMatch.template.position,
-      slot: `${templateMatch.template.startTime}-${templateMatch.template.endTime}`,
-      frequency: `${templateMatch.template.count}x in last 4 weeks`,
-      dayType: templateMatch.template.dayType
-    } : null,
-    candidates
-  };
+} else {
+  if (weekAvail.some(a=>a.employeeId===empId)) reasons.push(`No availability set for ${STORE_HOURS[targetDate.getDay()].label}`);
+}
+// 40hr cap?
+let weeklyHours=0;
+weekShifts.filter(s=>s.employeeId===empId).forEach(s=>{ weeklyHours+=(new Date(s.end)-new Date(s.start))/(1000*60*60); });
+const projectedHours = weeklyHours+shiftHours;
+if (projectedHours>40) reasons.push(`Would hit ${projectedHours.toFixed(1)}hrs (40hr max)`);
+// Consecutive?
+const streakDatesWorked = new Set(streakShifts.filter(s=>s.employeeId===empId).map(s=>new Date(s.start).toDateString()));
+streakDatesWorked.add(shiftDateStr);
+let maxConsecutive=0, current=0;
+for (let d=new Date(streakStart); d<=streakEnd; d.setDate(d.getDate()+1)) {
+  if (streakDatesWorked.has(d.toDateString())) { current++; maxConsecutive=Math.max(maxConsecutive,current); } else current=0;
+}
+if (maxConsecutive>6) reasons.push(`Would be ${maxConsecutive} consecutive days (6 max)`);
+else if (maxConsecutive===6) warnings.push(`This would be their 6th consecutive day`);
+const shiftsThisWeek = weekShifts.filter(s=>s.employeeId===empId).length;
+if (shiftsThisWeek+1===6) warnings.push('This would be their 6th shift this week');
+else if (shiftsThisWeek+1>6) warnings.push(`Would be shift #${shiftsThisWeek+1} this week`);
+const hist = historicalAvg[empId];
+if (hist) { if (projectedHours-hist.avg>8) warnings.push(`${(projectedHours-hist.avg).toFixed(1)}hrs above usual ${hist.avg.toFixed(1)}hrs/week`); notes.push(`Usually ${hist.avg.toFixed(1)}hrs/wk (${hist.min.toFixed(0)}-${hist.max.toFixed(0)} range)`); }
+notes.push(`${weeklyHours.toFixed(1)}hrs this week → ${projectedHours.toFixed(1)}hrs if covering`);
+candidates.push({ employee:empName, employeeId:empId, available:reasons.length===0, reasons, warnings, notes, weeklyHours, projectedHours, historicalAvg:hist?hist.avg:null });
+```
+
 }
 
-// GET /coverage/:day/:employee — Who can cover a shift
-app.get('/coverage/:day/:employee', async (req, res) => {
-  try {
-    const result = await findCoverage(req.params.day, req.params.employee);
-    res.json(result);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+candidates.sort((a,b)=>{ if(a.available&&!b.available) return -1; if(!a.available&&b.available) return 1; if(a.available&&b.available) return a.projectedHours-b.projectedHours; return 0; });
+const templateMatch = matchesTemplate(shiftToCover, shiftTemplates);
 
-// GET /timeoff — Get time-off requests
-app.get('/timeoff', async (req, res) => {
-  try {
-    const data = await slingGet('/leave/requests');
-    res.json(data);
-  } catch (err) {
-    // Try alternative endpoint
-    try {
-      const data = await slingGet('/leave');
-      res.json(data);
-    } catch (err2) {
-      res.status(500).json({ error: err2.message });
-    }
-  }
-});
+return {
+date: dateFormatted,
+dayContext: { dayName: salesContext.dayName, isPeak: salesContext.isPeak,
+storeHours: `${salesContext.storeHours.open}AM-${salesContext.storeHours.close>12?salesContext.storeHours.close-12+'PM':salesContext.storeHours.close+'AM'}`,
+shiftWindow: `${salesContext.storeHours.shiftEarliest%1===0.5?Math.floor(salesContext.storeHours.shiftEarliest)+':30AM':salesContext.storeHours.shiftEarliest+'AM'}-${salesContext.storeHours.shiftLatest>12?salesContext.storeHours.shiftLatest-12+'PM':salesContext.storeHours.shiftLatest+'AM'}`,
+avgRevenue: salesContext.avgRevenue, avgTickets: salesContext.avgTickets },
+shiftToCover: { employee:shiftToCover.employee, position:shiftToCover.position, location:shiftToCover.location, start:shiftToCover.start, end:shiftToCover.end, hours:shiftHours },
+templateMatch: templateMatch.match!==‘none’ ? { matchType:templateMatch.match, position:templateMatch.template.position, slot:`${templateMatch.template.startTime}-${templateMatch.template.endTime}`, frequency:`${templateMatch.template.count}x in last 4 weeks`, dayType:templateMatch.template.dayType } : null,
+candidates
+};
+}
 
-// GET /calendar/summaries — Hours and cost summaries
-app.get('/calendar/summaries', async (req, res) => {
-  try {
-    const { start, end } = req.query;
-    if (!start || !end) {
-      return res.status(400).json({ error: 'start and end query params required' });
-    }
-    const dates = `${start}/${end}`;
-    const data = await slingGet(`/calendar/summaries?dates=${encodeURIComponent(dates)}`);
-    res.json(data);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+app.get(’/coverage/:day/:employee’, async (req, res) => {
+try { const result = await findCoverage(req.params.day, req.params.employee); res.json(result); }
+catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ============================================================
 // WRITE ENDPOINTS
 // ============================================================
 
-// POST /shifts/create — Create a new shift
-// Body: { employee (name), position (name), date (string), startTime (HH:MM), endTime (HH:MM), publish (bool) }
-app.post('/shifts/create', async (req, res) => {
-  try {
-    const { employee, position, location, date, startTime, endTime, publish } = req.body;
-
-    // Look up user
-    const users = await slingGet('/users');
-    let userId = null;
-    if (employee) {
-      const user = findUserByName(users, employee);
-      if (!user) return res.status(404).json({ error: `Employee "${employee}" not found`, availableUsers: users.map(u => `${u.name} ${u.lname}`.trim()) });
-      userId = user.id;
-    }
-
-    // Look up position
-    let positionId = null;
-    if (position) {
-      const positions = await slingGet('/positions');
-      const pos = findPositionByName(positions, position);
-      if (!pos) return res.status(404).json({ error: `Position "${position}" not found`, availablePositions: positions.map(p => p.name) });
-      positionId = pos.id;
-    }
-
-    // Look up location
-    let locationId = null;
-    if (location) {
-      const locations = await slingGet('/locations');
-      const loc = locations.find(l => (l.name || '').toLowerCase().includes(location.toLowerCase()));
-      if (loc) locationId = loc.id;
-    }
-
-    // Build date/time
-    const { start: dayStart } = getDayRange(date);
-    const dayDate = new Date(dayStart);
-    const [sh, sm] = (startTime || '07:00').split(':').map(Number);
-    const [eh, em] = (endTime || '15:00').split(':').map(Number);
-
-    const dtstart = new Date(dayDate);
-    dtstart.setHours(sh, sm, 0, 0);
-    const dtend = new Date(dayDate);
-    dtend.setHours(eh, em, 0, 0);
-
-    const shiftBody = {
-      dtstart: dtstart.toISOString(),
-      dtend: dtend.toISOString(),
-      type: 'shift'
-    };
-
-    if (userId) shiftBody.user = { id: userId };
-    if (positionId) shiftBody.position = { id: positionId };
-    if (locationId) shiftBody.location = { id: locationId };
-    if (publish) shiftBody.status = 'published';
-
-    const result = await slingPost(`/shifts?publish=${publish ? 'true' : 'false'}`, [shiftBody]);
-
-    res.json({
-      success: true,
-      message: `Shift created for ${employee || 'unassigned'} on ${date} (${startTime || '07:00'}-${endTime || '15:00'})`,
-      shift: result
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+app.post(’/shifts/create’, async (req, res) => {
+try {
+const { employee, position, location, date, startTime, endTime, publish } = req.body;
+const users = await slingGet(’/users’);
+let userId = null;
+if (employee) { const user = findUserByName(users, employee); if (!user) return res.status(404).json({ error: `Employee "${employee}" not found`, availableUsers: users.map(u=>`${u.name} ${u.lname}`.trim()) }); userId = user.id; }
+let positionId = null;
+if (position) { const positions = await slingGet(’/positions’); const pos = findPositionByName(positions, position); if (!pos) return res.status(404).json({ error: `Position "${position}" not found` }); positionId = pos.id; }
+let locationId = null;
+if (location) { const locations = await slingGet(’/locations’); const loc = locations.find(l=>(l.name||’’).toLowerCase().includes(location.toLowerCase())); if (loc) locationId = loc.id; }
+const { start: dayStart } = getDayRange(date);
+const dayDate = new Date(dayStart);
+const [sh,sm] = (startTime||‘07:00’).split(’:’).map(Number);
+const [eh,em] = (endTime||‘15:00’).split(’:’).map(Number);
+const dtstart = new Date(dayDate); dtstart.setHours(sh,sm,0,0);
+const dtend = new Date(dayDate); dtend.setHours(eh,em,0,0);
+const shiftBody = { dtstart: dtstart.toISOString(), dtend: dtend.toISOString(), type: ‘shift’ };
+if (userId) shiftBody.user = { id: userId };
+if (positionId) shiftBody.position = { id: positionId };
+if (locationId) shiftBody.location = { id: locationId };
+if (publish) shiftBody.status = ‘published’;
+const result = await slingPost(`/shifts?publish=${publish?'true':'false'}`, [shiftBody]);
+res.json({ success: true, message: `Shift created for ${employee||'unassigned'} on ${date} (${startTime||'07:00'}-${endTime||'15:00'})`, shift: result });
+} catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// POST /shifts/swap — Swap one employee for another on an existing shift
-// Body: { currentEmployee, newEmployee, date, shiftId (optional — if known) }
-app.post('/shifts/swap', async (req, res) => {
-  try {
-    const { currentEmployee, newEmployee, date, shiftId } = req.body;
-
-    // Get users
-    const users = await slingGet('/users');
-    const currentUser = findUserByName(users, currentEmployee);
-    const newUser = findUserByName(users, newEmployee);
-
-    if (!currentUser) return res.status(404).json({ error: `Current employee "${currentEmployee}" not found` });
-    if (!newUser) return res.status(404).json({ error: `New employee "${newEmployee}" not found` });
-
-    let targetShiftId = shiftId;
-
-    // If no shiftId, find the shift by date + current employee
-    if (!targetShiftId && date) {
-      const { start, end } = getDayRange(date);
-      const dates = `${start}/${end}`;
-
-      const orgId = await getOrgId();
-
-      const { shifts: allShifts } = await getOrgCalendar(start, end);
-      const shifts = allShifts.filter(s => s.employeeId === currentUser.id);
-
-      if (shifts.length === 0) {
-        return res.status(404).json({
-          error: `No shift found for ${currentEmployee} on ${date}`,
-          hint: 'Check the date or employee name'
-        });
-      }
-      if (shifts.length > 1) {
-        return res.json({
-          error: `Multiple shifts found for ${currentEmployee} on ${date}. Please specify shiftId.`,
-          shifts: shifts.map(s => ({
-            id: s.id,
-            start: s.dtstart,
-            end: s.dtend,
-            position: s.position ? s.position.name : null
-          }))
-        });
-      }
-      targetShiftId = shifts[0].id;
-    }
-
-    if (!targetShiftId) {
-      return res.status(400).json({ error: 'Need either shiftId or date to find the shift' });
-    }
-
-    // Update the shift with new employee
-    const updateBody = {
-      user: { id: newUser.id }
-    };
-
-    const result = await slingPut(`/shifts/${targetShiftId}`, updateBody);
-
-    res.json({
-      success: true,
-      message: `Swapped ${currentEmployee} → ${newEmployee}`,
-      shiftId: targetShiftId,
-      result
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+app.post(’/shifts/swap’, async (req, res) => {
+try {
+const { currentEmployee, newEmployee, date, shiftId } = req.body;
+const users = await slingGet(’/users’);
+const currentUser = findUserByName(users, currentEmployee);
+const newUser = findUserByName(users, newEmployee);
+if (!currentUser) return res.status(404).json({ error: `Current employee "${currentEmployee}" not found` });
+if (!newUser) return res.status(404).json({ error: `New employee "${newEmployee}" not found` });
+let targetShiftId = shiftId;
+if (!targetShiftId && date) {
+const { start, end } = getDayRange(date);
+const { shifts: allShifts } = await getOrgCalendar(start, end);
+const shifts = allShifts.filter(s=>s.employeeId===currentUser.id);
+if (shifts.length===0) return res.status(404).json({ error: `No shift found for ${currentEmployee} on ${date}` });
+if (shifts.length>1) return res.json({ error: `Multiple shifts found for ${currentEmployee} on ${date}. Specify shiftId.`, shifts: shifts.map(s=>({id:s.id,start:s.start,end:s.end,position:s.position})) });
+targetShiftId = shifts[0].id;
+}
+if (!targetShiftId) return res.status(400).json({ error: ‘Need either shiftId or date’ });
+const result = await slingPut(`/shifts/${targetShiftId}`, { user: { id: newUser.id } });
+res.json({ success: true, message: `Swapped ${currentEmployee} → ${newEmployee}`, shiftId: targetShiftId, result });
+} catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// POST /shifts/assign — Assign employee to a specific date/position
-// Body: { employee, position (optional), date, startTime, endTime }
-app.post('/shifts/assign', async (req, res) => {
-  try {
-    const { employee, position, date, startTime, endTime, publish } = req.body;
-
-    // First check if there's an unassigned shift on that date for that position
-    const users = await slingGet('/users');
-    const user = findUserByName(users, employee);
-    if (!user) return res.status(404).json({ error: `Employee "${employee}" not found` });
-
-    const orgId = await getOrgId();
-
-    const { start, end, dateFormatted } = getDayRange(date);
-    const dates = `${start}/${end}`;
-    const { shifts: allShifts } = await getOrgCalendar(start, end);
-
-    // Look for unassigned shifts matching position
-    const unassigned = allShifts.filter(s => !s.employeeId);
-
-    let positionMatch = null;
-    if (position) {
-      const positions = await slingGet('/positions');
-      positionMatch = findPositionByName(positions, position);
-    }
-
-    const matchingUnassigned = unassigned.filter(s => {
-      if (!positionMatch) return true;
-      return s.position && s.position.id === positionMatch.id;
-    });
-
-    if (matchingUnassigned.length > 0) {
-      // Assign to existing unassigned shift
-      const shift = matchingUnassigned[0];
-      const result = await slingPut(`/shifts/${shift.id}`, { user: { id: user.id } });
-      return res.json({
-        success: true,
-        message: `Assigned ${employee} to existing ${position || ''} shift on ${dateFormatted}`,
-        shiftId: shift.id,
-        result
-      });
-    }
-
-    // No unassigned shift found, create a new one
-    const { start: dayStart } = getDayRange(date);
-    const dayDate = new Date(dayStart);
-    const [sh, sm] = (startTime || '07:00').split(':').map(Number);
-    const [eh, em] = (endTime || '15:00').split(':').map(Number);
-
-    const dtstart = new Date(dayDate);
-    dtstart.setHours(sh, sm, 0, 0);
-    const dtend = new Date(dayDate);
-    dtend.setHours(eh, em, 0, 0);
-
-    const shiftBody = {
-      dtstart: dtstart.toISOString(),
-      dtend: dtend.toISOString(),
-      type: 'shift',
-      user: { id: user.id }
-    };
-    if (positionMatch) shiftBody.position = { id: positionMatch.id };
-
-    const result = await slingPost(`/shifts?publish=${publish ? 'true' : 'false'}`, [shiftBody]);
-    res.json({
-      success: true,
-      message: `Created and assigned new shift for ${employee} on ${dateFormatted} (${startTime || '07:00'}-${endTime || '15:00'})`,
-      result
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+app.post(’/shifts/assign’, async (req, res) => {
+try {
+const { employee, position, date, startTime, endTime, publish } = req.body;
+const users = await slingGet(’/users’);
+const user = findUserByName(users, employee);
+if (!user) return res.status(404).json({ error: `Employee "${employee}" not found` });
+const { start, end, dateFormatted } = getDayRange(date);
+const { shifts: allShifts } = await getOrgCalendar(start, end);
+const unassigned = allShifts.filter(s=>!s.employeeId);
+let positionMatch = null;
+if (position) { const positions = await slingGet(’/positions’); positionMatch = findPositionByName(positions, position); }
+const matchingUnassigned = unassigned.filter(s=>{ if (!positionMatch) return true; return s.positionId===positionMatch.id; });
+if (matchingUnassigned.length>0) {
+const shift = matchingUnassigned[0];
+const result = await slingPut(`/shifts/${shift.id}`, { user: { id: user.id } });
+return res.json({ success: true, message: `Assigned ${employee} to existing shift on ${dateFormatted}`, shiftId: shift.id, result });
+}
+const { start: dayStart } = getDayRange(date);
+const dayDate = new Date(dayStart);
+const [sh,sm] = (startTime||‘07:00’).split(’:’).map(Number);
+const [eh,em] = (endTime||‘15:00’).split(’:’).map(Number);
+const dtstart = new Date(dayDate); dtstart.setHours(sh,sm,0,0);
+const dtend = new Date(dayDate); dtend.setHours(eh,em,0,0);
+const shiftBody = { dtstart: dtstart.toISOString(), dtend: dtend.toISOString(), type: ‘shift’, user: { id: user.id } };
+if (positionMatch) shiftBody.position = { id: positionMatch.id };
+const result = await slingPost(`/shifts?publish=${publish?'true':'false'}`, [shiftBody]);
+res.json({ success: true, message: `Created shift for ${employee} on ${dateFormatted} (${startTime||'07:00'}-${endTime||'15:00'})`, result });
+} catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// PUT /shifts/:id — Update a shift directly
-app.put('/shifts/:id', async (req, res) => {
-  try {
-    const result = await slingPut(`/shifts/${req.params.id}`, req.body);
-    res.json({ success: true, result });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+app.put(’/shifts/:id’, async (req, res) => {
+try { const result = await slingPut(`/shifts/${req.params.id}`, req.body); res.json({ success: true, result }); }
+catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// POST /shifts/publish — Publish shifts for a date range
-app.post('/shifts/publish', async (req, res) => {
-  try {
-    const { start, end } = req.body;
-    if (!start || !end) return res.status(400).json({ error: 'start and end required' });
-    const dates = `${start}/${end}`;
-    const result = await slingPost(`/shifts/publish?dates=${encodeURIComponent(dates)}`, {});
-    res.json({ success: true, message: `Published shifts from ${start} to ${end}`, result });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+app.delete(’/shifts/:id’, async (req, res) => {
+try { const result = await slingDelete(`/shifts/${req.params.id}`); res.json({ success: true, message: `Shift ${req.params.id} deleted`, result }); }
+catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// POST /shifts/unpublish — Unpublish shifts
-app.post('/shifts/unpublish', async (req, res) => {
-  try {
-    const { shiftIds } = req.body;
-    const result = await slingPost('/shifts/unpublish', shiftIds || []);
-    res.json({ success: true, result });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+app.post(’/shifts/publish’, async (req, res) => {
+try {
+const { start, end } = req.body;
+if (!start||!end) return res.status(400).json({ error: ‘start and end required’ });
+const result = await slingPost(`/shifts/publish?dates=${encodeURIComponent(`${start}/${end}`)}`, {});
+res.json({ success: true, message: `Published shifts ${start} to ${end}`, result });
+} catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post(’/shifts/unpublish’, async (req, res) => {
+try { const { shiftIds } = req.body; const result = await slingPost(’/shifts/unpublish’, shiftIds||[]); res.json({ success: true, result }); }
+catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ============================================================
+// SCHEDULING ENGINE v2.0 — NEW ENDPOINTS
+// ============================================================
+
+// GET /availability/:date
+app.get(’/availability/:date’, async (req, res) => {
+try {
+const { start, end, dateFormatted, isoDate, isWeekend } = getDayRange(req.params.date);
+const { shifts, leaves, availability } = await getOrgCalendar(start, end);
+const employees = Object.entries(EMPLOYEE_NAMES).map(([idStr, name]) => {
+const uid = parseInt(idStr);
+const hasLeave = leaves.find(l=>l.employeeId===uid);
+if (hasLeave) return { userId:uid, name, status:‘ON_LEAVE’, windows:[], note:hasLeave.note||’’ };
+const empAvails = availability.filter(a=>a.employeeId===uid);
+if (empAvails.length>0) {
+if (empAvails.some(a=>a.fullDay)) return { userId:uid, name, status:‘AVAILABLE_FULL_DAY’, windows:[{start:‘00:00’,end:‘23:59’}] };
+return { userId:uid, name, status:‘AVAILABLE_PARTIAL’, windows:empAvails.map(a=>({start:formatTimePT(a.start),end:formatTimePT(a.end)})) };
+}
+return { userId:uid, name, status:‘NO_AVAILABILITY_SUBMITTED’, windows:[] };
+});
+const scheduled = shifts.filter(s=>s.employeeId).map(s=>({ userId:s.employeeId, name:s.employee, position:s.position, location:s.location, start:formatTimePT(s.start), end:formatTimePT(s.end) }));
+res.json({ date:dateFormatted, isoDate, isWeekend, employees:employees.sort((a,b)=>a.name.localeCompare(b.name)), scheduled });
+} catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// GET /conflicts
+app.get(’/conflicts’, async (req, res) => {
+try {
+const days = parseInt(req.query.days)||7;
+const now = new Date();
+const endDate = new Date(now); endDate.setDate(now.getDate()+days); endDate.setHours(23,59,59,999);
+const { shifts, leaves, availability } = await getOrgCalendar(now.toISOString(), endDate.toISOString());
+const conflicts = [];
+const leaveByUserDate = {};
+leaves.forEach(l => {
+const s=new Date(l.start); const e=new Date(l.end);
+for (let d=new Date(s); d<=e; d.setDate(d.getDate()+1)) leaveByUserDate[`${l.employeeId}-${d.toDateString()}`]=l;
+});
+const availByUserDate = {};
+availability.forEach(a => { const key=`${a.employeeId}-${new Date(a.start).toDateString()}`; if(!availByUserDate[key]) availByUserDate[key]=[]; availByUserDate[key].push(a); });
+const assignedShifts = shifts.filter(s=>s.employeeId);
+assignedShifts.forEach(shift => {
+const uid=shift.employeeId; const shiftDateStr=new Date(shift.start).toDateString(); const shiftDate=toISODatePT(new Date(shift.start)); const empName=shift.employee;
+if (leaveByUserDate[`${uid}-${shiftDateStr}`]) conflicts.push({ type:‘LEAVE_CONFLICT’, severity:‘RED’, employee:empName, employeeId:uid, date:shiftDate, message:`${empName} scheduled on ${shiftDate} but has approved leave.` });
+const avails = availByUserDate[`${uid}-${shiftDateStr}`];
+if (avails && avails.length>0 && !avails.some(a=>a.fullDay)) {
+const fits = avails.some(a=>new Date(shift.start)>=new Date(a.start) && new Date(shift.end)<=new Date(a.end));
+if (!fits) { const windows=avails.map(a=>`${formatTimePT(a.start)}-${formatTimePT(a.end)}`); conflicts.push({ type:‘AVAILABILITY_CONFLICT’, severity:‘RED’, employee:empName, employeeId:uid, date:shiftDate, message:`${empName} scheduled outside availability on ${shiftDate}. Windows: ${windows.join(', ')}` }); }
+}
+if (CROSS_LOCATION_POOL.includes(uid)) {
+const sameDay = assignedShifts.filter(s=>s.employeeId===uid && new Date(s.start).toDateString()===shiftDateStr && s.locationId!==shift.locationId && s.locationId && shift.locationId);
+if (sameDay.length>0 && shift.locationId===LOCATIONS.CLEMENT) conflicts.push({ type:‘CROSS_LOCATION_CONFLICT’, severity:‘RED’, employee:empName, employeeId:uid, date:shiftDate, message:`${empName} scheduled at BOTH locations on ${shiftDate}.` });
+}
+});
+const seen = new Set();
+const unique = conflicts.filter(c=>{ const key=`${c.type}-${c.employeeId}-${c.date}`; if(seen.has(key)) return false; seen.add(key); return true; });
+res.json({ period:`${toISODatePT(now)} to ${toISODatePT(endDate)}`, days, conflictCount:unique.length, conflicts:unique.sort((a,b)=>a.date.localeCompare(b.date)) });
+} catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// GET /weekly-hours/:userId
+app.get(’/weekly-hours/:userId’, async (req, res) => {
+try {
+const userId = parseInt(req.params.userId);
+const empName = EMPLOYEE_NAMES[userId]||`ID:${userId}`;
+const { start, end } = getWeekRange(req.query.week||‘today’);
+const { shifts } = await getOrgCalendar(start, end);
+const empShifts = shifts.filter(s=>s.employeeId===userId);
+let totalHours=0, clementHours=0, ninthHours=0;
+const dailyBreakdown = {};
+empShifts.forEach(s => {
+const hours = s.duration||(new Date(s.end)-new Date(s.start))/3600000;
+const dateKey = toISODatePT(new Date(s.start));
+totalHours += hours;
+if (s.locationId===LOCATIONS.CLEMENT||(s.location||’’).includes(‘Clement’)) clementHours+=hours;
+else if (s.locationId===LOCATIONS.NINTH||(s.location||’’).includes(‘9th’)) ninthHours+=hours;
+if (!dailyBreakdown[dateKey]) dailyBreakdown[dateKey]={shifts:[],totalHours:0};
+dailyBreakdown[dateKey].shifts.push({ start:s.start, end:s.end, hours:Math.round(hours*100)/100, position:s.position, location:s.location });
+dailyBreakdown[dateKey].totalHours+=hours;
+});
+Object.values(dailyBreakdown).forEach(d=>{d.totalHours=Math.round(d.totalHours*100)/100;});
+res.json({ employee:empName, employeeId:userId, weekOf:start.slice(0,10), totalHours:Math.round(totalHours*100)/100, clementHours:Math.round(clementHours*100)/100, ninthStHours:Math.round(ninthHours*100)/100, maxWeeklyHours:MAX_WEEKLY_HOURS, remainingBeforeOT:Math.round(Math.max(0,MAX_WEEKLY_HOURS-totalHours)*100)/100, wouldExceedCap:totalHours>MAX_WEEKLY_HOURS, shiftCount:empShifts.length, dailyBreakdown });
+} catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// GET /schedule/coverage/:date
+app.get(’/schedule/coverage/:date’, async (req, res) => {
+try {
+const { start, end, dateFormatted, isWeekend } = getDayRange(req.params.date);
+const { shifts } = await getOrgCalendar(start, end);
+const hours = [];
+for (let h=6; h<=18; h++) {
+for (let m=0; m<60; m+=30) {
+const timeStr = `${h.toString().padStart(2,'0')}:${m.toString().padStart(2,'0')}`;
+const timeDate = new Date(start); timeDate.setHours(h,m,0,0);
+const clementOnFloor = shifts.filter(s=>(s.location||’’).includes(‘Clement’) && new Date(s.start)<=timeDate && new Date(s.end)>timeDate);
+const ninthOnFloor = shifts.filter(s=>(s.location||’’).includes(‘9th’) && new Date(s.start)<=timeDate && new Date(s.end)>timeDate);
+if (clementOnFloor.length>0||ninthOnFloor.length>0) {
+hours.push({ time:timeStr, clement:{count:clementOnFloor.length, employees:clementOnFloor.map(s=>({name:s.employee,position:s.position}))}, ninthSt:{count:ninthOnFloor.length, employees:ninthOnFloor.map(s=>({name:s.employee,position:s.position}))} });
+}
+}
+}
+const clementMin = COVERAGE_MINS[isWeekend?‘CLEMENT_WEEKEND’:‘CLEMENT_WEEKDAY’];
+const ninthMin = COVERAGE_MINS[isWeekend?‘NINTH_WEEKEND’:‘NINTH_WEEKDAY’];
+const warnings = hours.filter(h=>(h.clement.count>0&&h.clement.count<clementMin)||(h.ninthSt.count>0&&h.ninthSt.count<ninthMin)).map(h=>({
+time:h.time, issue: h.clement.count>0&&h.clement.count<clementMin ? `Clement: ${h.clement.count} staff (min: ${clementMin})` : `9th St: ${h.ninthSt.count} staff (min: ${ninthMin})`
+}));
+const cc=hours.filter(h=>h.clement.count>0).map(h=>h.clement.count);
+const nc=hours.filter(h=>h.ninthSt.count>0).map(h=>h.ninthSt.count);
+res.json({ date:dateFormatted, isWeekend, coverage:hours, warnings, summary:{ clementPeak:cc.length?Math.max(…cc):0, clementMin:cc.length?Math.min(…cc):0, ninthStPeak:nc.length?Math.max(…nc):0, warningCount:warnings.length } });
+} catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// GET /schedule/consecutive/:userId
+app.get(’/schedule/consecutive/:userId’, async (req, res) => {
+try {
+const userId = parseInt(req.params.userId);
+const empName = EMPLOYEE_NAMES[userId]||`ID:${userId}`;
+const centerDate = req.query.date ? new Date(getDayRange(req.query.date).start) : new Date();
+const rangeStart = new Date(centerDate); rangeStart.setDate(centerDate.getDate()-10); rangeStart.setHours(0,0,0,0);
+const rangeEnd = new Date(centerDate); rangeEnd.setDate(centerDate.getDate()+10); rangeEnd.setHours(23,59,59,999);
+const { shifts } = await getOrgCalendar(rangeStart.toISOString(), rangeEnd.toISOString());
+const empShifts = shifts.filter(s=>s.employeeId===userId);
+const workDates = new Set(empShifts.map(s=>new Date(s.start).toDateString()));
+const allDates = [];
+for (let d=new Date(rangeStart); d<=rangeEnd; d.setDate(d.getDate()+1)) allDates.push(new Date(d));
+let centerStreak=[], activeStreak=[], longestStreak=[];
+for (const date of allDates) {
+if (workDates.has(date.toDateString())) { activeStreak.push(toISODatePT(date)); }
+else { if(activeStreak.length>longestStreak.length) longestStreak=[…activeStreak]; if(activeStreak.some(d=>d===toISODatePT(centerDate))) centerStreak=[…activeStreak]; activeStreak=[]; }
+}
+if(activeStreak.length>longestStreak.length) longestStreak=[…activeStreak];
+if(activeStreak.some(d=>d===toISODatePT(centerDate))) centerStreak=[…activeStreak];
+res.json({ employee:empName, employeeId:userId, centerDate:toISODatePT(centerDate), currentStreak:centerStreak.length, currentStreakDates:centerStreak, longestStreak:longestStreak.length, longestStreakDates:longestStreak, violations:{ hardBlock:centerStreak.length>=MAX_CONSECUTIVE_DAYS, needsApproval:centerStreak.length>=WARN_CONSECUTIVE_DAYS&&centerStreak.length<MAX_CONSECUTIVE_DAYS }, workDatesInRange:[…workDates].map(d=>toISODatePT(new Date(d))).sort() });
+} catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// POST /schedule/validate
+app.post(’/schedule/validate’, async (req, res) => {
+try {
+const { employeeId, employee, date, startTime, endTime, location } = req.body;
+let userId = employeeId ? parseInt(employeeId) : resolveEmployeeId(employee);
+if (!userId) return res.status(400).json({ error: `Employee not found: ${employee||employeeId}` });
+if (!date) return res.status(400).json({ error: ‘date required’ });
+const empName = EMPLOYEE_NAMES[userId]||`ID:${userId}`;
+const { start, end, dateFormatted, isoDate, isWeekend } = getDayRange(date);
+const violations=[]; const warnings=[];
+let targetLocId = LOCATIONS.CLEMENT;
+if (location) { if (typeof location===‘string’&&location.toLowerCase().includes(‘9th’)) targetLocId=LOCATIONS.NINTH; else if (typeof location===‘number’) targetLocId=location; }
+
+```
+// GATE 1: Availability + Leave
+const { shifts:dayShifts, leaves:dayLeaves, availability:dayAvails } = await getOrgCalendar(start, end);
+const hasLeave = dayLeaves.find(l=>l.employeeId===userId);
+if (hasLeave) violations.push({ rule:'LEAVE-001', severity:'RED', message:`${empName} has approved leave on ${isoDate}.` });
+const empAvails = dayAvails.filter(a=>a.employeeId===userId);
+if (empAvails.length>0 && startTime && endTime) {
+  if (!empAvails.some(a=>a.fullDay)) {
+    const [sh,sm]=(startTime).split(':').map(Number); const [eh,em]=(endTime).split(':').map(Number);
+    const shiftStartMin=sh*60+(sm||0); const shiftEndMin=eh*60+(em||0);
+    const fitsAny = empAvails.some(a=>{ const aS=new Date(a.start); const aE=new Date(a.end); return shiftStartMin>=aS.getHours()*60+aS.getMinutes() && shiftEndMin<=aE.getHours()*60+aE.getMinutes(); });
+    if (!fitsAny) { const windows=empAvails.map(a=>`${formatTimePT(a.start)}-${formatTimePT(a.end)}`); violations.push({ rule:'AVAIL-001', severity:'RED', message:`${empName} not available for ${startTime}-${endTime} on ${isoDate}. Windows: ${windows.join(', ')}` }); }
   }
+} else if (empAvails.length===0&&!hasLeave) {
+  warnings.push({ rule:'AVAIL-FALLBACK', severity:'YELLOW', message:`${empName} has not submitted availability for ${isoDate}.` });
+}
+
+// GATE 2: Cross-location
+if (CROSS_LOCATION_POOL.includes(userId)) {
+  const otherLocId = targetLocId===LOCATIONS.CLEMENT?LOCATIONS.NINTH:LOCATIONS.CLEMENT;
+  const otherLocShift = dayShifts.find(s=>s.employeeId===userId && (s.locationId===otherLocId || (otherLocId===LOCATIONS.NINTH&&(s.location||'').includes('9th')) || (otherLocId===LOCATIONS.CLEMENT&&(s.location||'').includes('Clement'))));
+  if (otherLocShift) violations.push({ rule:'XLOC-001', severity:'RED', message:`${empName} already scheduled at ${LOCATION_NAMES[otherLocId]} on ${isoDate}.` });
+}
+
+// GATE 3: Weekly hours
+const { start:weekStart, end:weekEnd } = getWeekRange(isoDate);
+const { shifts:weekShifts } = await getOrgCalendar(weekStart, weekEnd);
+let weeklyHours = weekShifts.filter(s=>s.employeeId===userId).reduce((sum,s)=>sum+(s.duration||(new Date(s.end)-new Date(s.start))/3600000),0);
+let proposedHours = 0;
+if (startTime&&endTime) { const [sh,sm]=startTime.split(':').map(Number); const [eh,em]=endTime.split(':').map(Number); proposedHours=((eh*60+(em||0))-(sh*60+(sm||0)))/60; }
+const projectedHours = weeklyHours+proposedHours;
+if (projectedHours>MAX_WEEKLY_HOURS) violations.push({ rule:'HOURS-001', severity:'ORANGE', message:`${empName} would have ${projectedHours.toFixed(1)}hrs this week (max: ${MAX_WEEKLY_HOURS}).`, currentHours:Math.round(weeklyHours*100)/100, projectedHours:Math.round(projectedHours*100)/100 });
+
+// GATE 4: Consecutive days
+const streakStart = new Date(start); streakStart.setDate(streakStart.getDate()-8);
+const streakEnd = new Date(start); streakEnd.setDate(streakEnd.getDate()+8);
+const { shifts:streakShifts } = await getOrgCalendar(streakStart.toISOString(), streakEnd.toISOString());
+const workDates = new Set(streakShifts.filter(s=>s.employeeId===userId).map(s=>new Date(s.start).toDateString()));
+workDates.add(new Date(start).toDateString());
+let streak=1; let checkDate=new Date(start);
+while(true) { checkDate.setDate(checkDate.getDate()-1); if(workDates.has(checkDate.toDateString())) streak++; else break; }
+checkDate=new Date(start);
+while(true) { checkDate.setDate(checkDate.getDate()+1); if(workDates.has(checkDate.toDateString())) streak++; else break; }
+if (streak>=MAX_CONSECUTIVE_DAYS) violations.push({ rule:'CONSEC-001', severity:'RED', message:`${empName} would work ${streak} consecutive days. HARD BLOCK.`, consecutiveDays:streak });
+else if (streak>=WARN_CONSECUTIVE_DAYS) violations.push({ rule:'CONSEC-002', severity:'ORANGE', message:`${empName} would work ${streak} consecutive days. Requires approval.`, consecutiveDays:streak });
+
+const redV = violations.filter(v=>v.severity==='RED');
+const orangeV = violations.filter(v=>v.severity==='ORANGE');
+let status;
+if (redV.length>0) status='BLOCKED'; else if (orangeV.length>0) status='NEEDS_APPROVAL'; else if (warnings.length>0) status='UNCONFIRMED'; else status='APPROVED';
+res.json({ status, employee:empName, employeeId:userId, date:isoDate, proposedShift:startTime&&endTime?`${startTime}-${endTime}`:'unspecified', location:LOCATION_NAMES[targetLocId]||'Unknown', violations, warnings, weeklyHours:Math.round(weeklyHours*100)/100, projectedHours:Math.round(projectedHours*100)/100, consecutiveDays:streak, summary: status==='BLOCKED'?`BLOCKED: ${redV.map(v=>v.rule).join(', ')}`:status==='NEEDS_APPROVAL'?`HOLD: ${orangeV.map(v=>v.rule).join(', ')}`:status==='UNCONFIRMED'?`Availability unconfirmed for ${empName} on ${isoDate}`:`${empName} passes all checks for ${isoDate}` });
+```
+
+} catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// POST /cron/check-conflicts
+app.post(’/cron/check-conflicts’, async (req, res) => {
+try {
+const confRes = await fetch(`http://localhost:${PORT}/conflicts?days=7`);
+const conflicts = await confRes.json();
+if (conflicts.conflictCount===0) return res.json({ message:‘No conflicts found’, alerted:false });
+const slackText = `\u{1F6A8} *${conflicts.conflictCount} Schedule Conflict(s) Found*\nPeriod: ${conflicts.period}\n\n` +
+conflicts.conflicts.map(c=>`\u{2022} *${c.type}* \u{2014} ${c.message}`).join(’\n’) + ‘\n\n_Review and resolve before shifts begin._’;
+const slackResult = await postToSlack(slackText);
+res.json({ message:`Alerted ${conflicts.conflictCount} conflicts`, alerted:!!slackResult, conflicts:conflicts.conflicts });
+} catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ============================================================
 // NATURAL LANGUAGE COMMAND PROCESSOR
 // ============================================================
 
-app.post('/command', async (req, res) => {
-  try {
-    const { command } = req.body;
-    if (!command) return res.status(400).json({ error: 'command field required' });
+app.post(’/command’, async (req, res) => {
+try {
+const { command } = req.body;
+if (!command) return res.status(400).json({ error: ‘command field required’ });
+const lower = command.toLowerCase();
 
-    const lower = command.toLowerCase();
+```
+const whosWorkingMatch = lower.match(/who(?:'s| is) working (\w+)/);
+if (whosWorkingMatch) {
+  const date = whosWorkingMatch[1];
+  const { start, end, dateFormatted } = getDayRange(date);
+  const { shifts: allShifts } = await getOrgCalendar(start, end);
+  const working = allShifts.filter(s=>s.employeeId).map(s=>`${s.employee}`+(s.position?` (${s.position})`:'')+` ${formatTimePT(s.start)}-${formatTimePT(s.end)}`);
+  return res.json({ date: dateFormatted, working });
+}
 
-    // Pattern: "who's working today/tomorrow/tuesday"
-    const whosWorkingMatch = lower.match(/who(?:'s| is) working (\w+)/);
-    if (whosWorkingMatch) {
-      const date = whosWorkingMatch[1];
-      const { start, end, dateFormatted } = getDayRange(date);
-      const dates = `${start}/${end}`;
-      const users = await slingGet('/users');
-      const orgId = await getOrgId();
-      const { shifts: allShifts } = await getOrgCalendar(start, end);
-      const working = allShifts
-        .filter(s => s.employeeId)
-        .map(s => `${s.employee}` + (s.position ? ` (${s.position})` : '') + ` ${new Date(s.start).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}-${new Date(s.end).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}`);
-      return res.json({ date: dateFormatted, working });
-    }
+const valMatch = lower.match(/validate\s+(\w+)\s+(?:for|on)\s+(.+)/);
+if (valMatch) {
+  const [,emp,date] = valMatch;
+  const valRes = await fetch(`http://localhost:${PORT}/schedule/validate`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({employee:emp,date:date.trim()}) });
+  return res.json(await valRes.json());
+}
 
-    // Pattern: "swap X with Y on DATE" or "replace X with Y on DATE"
-    const swapMatch = lower.match(/(?:swap|replace|switch)\s+(\w+)\s+(?:with|for|→|->)\s+(\w+)\s+(?:on\s+)?(\w+)/);
-    if (swapMatch) {
-      const [, currentEmp, newEmp, date] = swapMatch;
-      // Forward to swap endpoint
-      const swapRes = await fetch(`http://localhost:${PORT}/shifts/swap`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ currentEmployee: currentEmp, newEmployee: newEmp, date })
-      });
-      return res.json(await swapRes.json());
-    }
+const hoursMatch = lower.match(/hours\s+(?:for\s+)?(\w+)/);
+if (hoursMatch) {
+  const uid = resolveEmployeeId(hoursMatch[1]);
+  if (uid) { const hoursRes = await fetch(`http://localhost:${PORT}/weekly-hours/${uid}`); return res.json(await hoursRes.json()); }
+}
 
-    // Pattern: "schedule/assign X for POSITION on DATE"
-    const assignMatch = lower.match(/(?:schedule|assign|add|put)\s+(\w+)\s+(?:for|as|to)\s+(\w+)\s+(?:on\s+)?(\w+)/);
-    if (assignMatch) {
-      const [, emp, position, date] = assignMatch;
-      const assignRes = await fetch(`http://localhost:${PORT}/shifts/assign`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ employee: emp, position, date })
-      });
-      return res.json(await assignRes.json());
-    }
+if (lower.includes('conflict')) {
+  const confRes = await fetch(`http://localhost:${PORT}/conflicts`);
+  return res.json(await confRes.json());
+}
 
-    return res.json({
-      error: 'Could not parse command',
-      hint: 'Try: "who\'s working today", "swap Jesus with Jessica on Tuesday", "schedule Clayton for barista on Tuesday"',
-      rawCommand: command
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+const covMatch = lower.match(/coverage\s+(?:for\s+)?(\w+)/);
+if (covMatch) {
+  const covRes = await fetch(`http://localhost:${PORT}/schedule/coverage/${covMatch[1]}`);
+  return res.json(await covRes.json());
+}
+
+const swapMatch = lower.match(/(?:swap|replace|switch)\s+(\w+)\s+(?:with|for|→|->)\s+(\w+)\s+(?:on\s+)?(\w+)/);
+if (swapMatch) {
+  const [,currentEmp,newEmp,date] = swapMatch;
+  const swapRes = await fetch(`http://localhost:${PORT}/shifts/swap`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({currentEmployee:currentEmp,newEmployee:newEmp,date}) });
+  return res.json(await swapRes.json());
+}
+
+const assignMatch = lower.match(/(?:schedule|assign|add|put)\s+(\w+)\s+(?:for|as|to)\s+(\w+)\s+(?:on\s+)?(\w+)/);
+if (assignMatch) {
+  const [,emp,position,date] = assignMatch;
+  const assignRes = await fetch(`http://localhost:${PORT}/shifts/assign`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({employee:emp,position,date}) });
+  return res.json(await assignRes.json());
+}
+
+const consecMatch = lower.match(/(?:consecutive|streak)\s+(?:for\s+)?(\w+)/);
+if (consecMatch) {
+  const uid = resolveEmployeeId(consecMatch[1]);
+  if (uid) { const consecRes = await fetch(`http://localhost:${PORT}/schedule/consecutive/${uid}`); return res.json(await consecRes.json()); }
+}
+
+return res.json({ error:'Could not parse command', hint:'Try: "who\'s working today", "validate Sara for Monday", "hours for Jessica", "conflicts", "coverage tomorrow", "consecutive Sara"', rawCommand:command });
+```
+
+} catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ============================================================
-// AUTH ENDPOINT — Get token from email/password
+// AUTH
 // ============================================================
 
-app.post('/auth/login', async (req, res) => {
-  try {
-    const { email, password } = req.body;
-    const loginRes = await fetch(`${SLING_BASE}/account/login`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password })
-    });
-
-    if (!loginRes.ok) {
-      const text = await loginRes.text();
-      return res.status(loginRes.status).json({ error: `Login failed: ${text}` });
-    }
-
-    // Token is in the response headers
-    const token = loginRes.headers.get('authorization');
-    const body = await loginRes.json();
-
-    res.json({
-      success: true,
-      token,
-      user: body,
-      note: 'Set this token as SLING_TOKEN environment variable on Render'
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+app.post(’/auth/login’, async (req, res) => {
+try {
+const { email, password } = req.body;
+const loginRes = await fetch(`${SLING_BASE}/account/login`, { method:‘POST’, headers:{‘Content-Type’:‘application/json’}, body:JSON.stringify({email,password}) });
+if (!loginRes.ok) { const text = await loginRes.text(); return res.status(loginRes.status).json({ error: `Login failed: ${text}` }); }
+const token = loginRes.headers.get(‘authorization’);
+const body = await loginRes.json();
+res.json({ success:true, token, user:body, note:‘Set this token as SLING_TOKEN environment variable on Render’ });
+} catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ============================================================
 // SLACK INTEGRATION
 // ============================================================
 
-const SLACK_CHANNEL = 'C0AELGYN2LC'; // #sling-scheduling-san-francisco
+const SLACK_CHANNEL = ‘C0AELGYN2LC’;
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
 
-// Simple daily scheduler — checks every minute, fires once at target hour
 let _lastPostedDate = null;
 function startDailyScheduler() {
-  if (!SLACK_BOT_TOKEN && !process.env.SLACK_WEBHOOK_URL) {
-    console.log('No Slack credentials set, daily scheduler disabled');
-    return;
-  }
-  const POST_HOUR = 17; // 5pm Pacific
-  
-  setInterval(async () => {
-    const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }));
-    const today = now.toDateString();
-    
-    if (now.getHours() === POST_HOUR && _lastPostedDate !== today) {
-      _lastPostedDate = today;
-      console.log('Daily scheduler: posting tomorrow\'s schedule...');
-      try {
-        const { start, end, dateFormatted } = getDayRange('tomorrow');
-        const { shifts } = await getOrgCalendar(start, end);
-        const message = formatScheduleForSlack(dateFormatted, shifts);
-        const result = await postToSlack(message);
-        console.log('Daily scheduler: posted successfully', result?.ok);
-      } catch (err) {
-        console.error('Daily scheduler error:', err.message);
-      }
-    }
-  }, 60 * 1000); // Check every minute
-  
-  console.log(`Daily scheduler: will post tomorrow's schedule at ${POST_HOUR}:00 PT`);
+if (!SLACK_BOT_TOKEN && !process.env.SLACK_WEBHOOK_URL) { console.log(‘No Slack credentials set, daily scheduler disabled’); return; }
+const POST_HOUR = 17;
+setInterval(async () => {
+const now = new Date(new Date().toLocaleString(‘en-US’, { timeZone: ‘America/Los_Angeles’ }));
+const today = now.toDateString();
+if (now.getHours()===POST_HOUR && _lastPostedDate!==today) {
+_lastPostedDate = today;
+console.log(‘Daily scheduler: posting tomorrow's schedule…’);
+try {
+const { start, end, dateFormatted } = getDayRange(‘tomorrow’);
+const { shifts } = await getOrgCalendar(start, end);
+const message = formatScheduleForSlack(dateFormatted, shifts);
+const result = await postToSlack(message);
+console.log(‘Daily scheduler: posted successfully’, result?.ok);
+try { await fetch(`http://localhost:${PORT}/cron/check-conflicts`, { method:‘POST’ }); console.log(‘Daily scheduler: conflict check complete’); } catch(e) { console.error(‘Conflict check error:’, e.message); }
+} catch (err) { console.error(‘Daily scheduler error:’, err.message); }
+}
+}, 60*1000);
+console.log(`Daily scheduler: will post tomorrow's schedule at ${POST_HOUR}:00 PT`);
 }
 
 async function postToSlack(text, blocks) {
-  // Support both webhook URL and bot token
-  const webhookUrl = process.env.SLACK_WEBHOOK_URL;
-  const botToken = SLACK_BOT_TOKEN;
-  
-  if (webhookUrl) {
-    const res = await fetch(webhookUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text })
-    });
-    return { ok: res.ok, status: res.status };
-  }
-  
-  if (botToken) {
-    const body = { channel: SLACK_CHANNEL, text };
-    if (blocks) body.blocks = blocks;
-    const res = await fetch('https://slack.com/api/chat.postMessage', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${botToken}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(body)
-    });
-    return res.json();
-  }
-  
-  console.log('No Slack credentials configured, skipping post');
-  return null;
+const webhookUrl = process.env.SLACK_WEBHOOK_URL;
+const botToken = SLACK_BOT_TOKEN;
+if (webhookUrl) { const res = await fetch(webhookUrl, { method:‘POST’, headers:{‘Content-Type’:‘application/json’}, body:JSON.stringify({text}) }); return { ok:res.ok, status:res.status }; }
+if (botToken) { const body = { channel:SLACK_CHANNEL, text }; if(blocks) body.blocks=blocks; const res = await fetch(‘https://slack.com/api/chat.postMessage’, { method:‘POST’, headers:{‘Authorization’:`Bearer ${botToken}`,‘Content-Type’:‘application/json’}, body:JSON.stringify(body) }); return res.json(); }
+console.log(‘No Slack credentials configured, skipping post’);
+return null;
 }
 
-// Format a schedule into a Slack message
 function formatScheduleForSlack(dateStr, shifts) {
-  const clementShifts = shifts.filter(s => (s.location || '').includes('Clement'));
-  const ninthShifts = shifts.filter(s => (s.location || '').includes('9th'));
-  
-  let text = `📋 *Schedule for ${dateStr}*\n\n`;
-  
-  if (clementShifts.length > 0) {
-    text += `*Clement Pixlcat* (${clementShifts.length} shifts)\n`;
-    // Sort by start time
-    clementShifts.sort((a, b) => a.start.localeCompare(b.start));
-    for (const s of clementShifts) {
-      const startTime = new Date(s.start).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
-      const endTime = new Date(s.end).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
-      text += `  • ${s.employee} — ${s.position || 'TBD'} (${startTime} - ${endTime})\n`;
-    }
-  }
-  
-  if (ninthShifts.length > 0) {
-    text += `\n*9th St Pixlcat* (${ninthShifts.length} shifts)\n`;
-    ninthShifts.sort((a, b) => a.start.localeCompare(b.start));
-    for (const s of ninthShifts) {
-      const startTime = new Date(s.start).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
-      const endTime = new Date(s.end).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
-      text += `  • ${s.employee} — ${s.position || 'TBD'} (${startTime} - ${endTime})\n`;
-    }
-  }
-  
-  if (shifts.length === 0) {
-    text += '_No shifts scheduled._\n';
-  }
-  
-  return text;
+const clementShifts = shifts.filter(s=>(s.location||’’).includes(‘Clement’));
+const ninthShifts = shifts.filter(s=>(s.location||’’).includes(‘9th’));
+let text = `\u{1F4CB} *Schedule for ${dateStr}*\n\n`;
+if (clementShifts.length>0) {
+text += `*Clement Pixlcat* (${clementShifts.length} shifts)\n`;
+clementShifts.sort((a,b)=>a.start.localeCompare(b.start));
+for (const s of clementShifts) text += `  \u{2022} ${s.employee} \u{2014} ${s.position||'TBD'} (${formatTimePT(s.start)} - ${formatTimePT(s.end)})\n`;
+}
+if (ninthShifts.length>0) {
+text += `\n*9th St Pixlcat* (${ninthShifts.length} shifts)\n`;
+ninthShifts.sort((a,b)=>a.start.localeCompare(b.start));
+for (const s of ninthShifts) text += `  \u{2022} ${s.employee} \u{2014} ${s.position||'TBD'} (${formatTimePT(s.start)} - ${formatTimePT(s.end)})\n`;
+}
+if (shifts.length===0) text += ‘*No shifts scheduled.*\n’;
+return text;
 }
 
-// GET /slack/daily — Post today's schedule to Slack
-app.get('/slack/daily', async (req, res) => {
-  try {
-    const { start, end, dateFormatted } = getDayRange('today');
-    const { shifts } = await getOrgCalendar(start, end);
-    const message = formatScheduleForSlack(dateFormatted, shifts);
-    const result = await postToSlack(message);
-    res.json({ success: true, message: 'Posted daily schedule to Slack', slackResult: result });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+app.get(’/slack/daily’, async (req, res) => {
+try {
+const { start, end, dateFormatted } = getDayRange(‘today’);
+const { shifts } = await getOrgCalendar(start, end);
+const message = formatScheduleForSlack(dateFormatted, shifts);
+const result = await postToSlack(message);
+res.json({ success:true, message:‘Posted daily schedule to Slack’, slackResult:result });
+} catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// GET /slack/tomorrow — Post tomorrow's schedule to Slack
-app.get('/slack/tomorrow', async (req, res) => {
-  try {
-    const { start, end, dateFormatted } = getDayRange('tomorrow');
-    const { shifts } = await getOrgCalendar(start, end);
-    const message = formatScheduleForSlack(dateFormatted, shifts);
-    const result = await postToSlack(message);
-    res.json({ success: true, message: 'Posted tomorrow\'s schedule to Slack', slackResult: result });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+app.get(’/slack/tomorrow’, async (req, res) => {
+try {
+const { start, end, dateFormatted } = getDayRange(‘tomorrow’);
+const { shifts } = await getOrgCalendar(start, end);
+const message = formatScheduleForSlack(dateFormatted, shifts);
+const result = await postToSlack(message);
+res.json({ success:true, message:‘Posted tomorrow schedule to Slack’, slackResult:result });
+} catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// GET /cron/daily — External cron hits this at 5pm PT to post tomorrow's schedule
-// Secured with a simple secret token
-app.get('/cron/daily', async (req, res) => {
-  const cronSecret = process.env.CRON_SECRET;
-  if (cronSecret && req.query.key !== cronSecret) {
-    return res.status(403).json({ error: 'Invalid cron key' });
-  }
-  try {
-    const { start, end, dateFormatted } = getDayRange('tomorrow');
-    const { shifts } = await getOrgCalendar(start, end);
-    const message = formatScheduleForSlack(dateFormatted, shifts);
-    const result = await postToSlack(message);
-    console.log(`Cron: posted tomorrow's schedule (${dateFormatted}, ${shifts.length} shifts)`);
-    res.json({ success: true, date: dateFormatted, shiftsPosted: shifts.length });
-  } catch (err) {
-    console.error('Cron error:', err.message);
-    res.status(500).json({ error: err.message });
-  }
+app.get(’/cron/daily’, async (req, res) => {
+const cronSecret = process.env.CRON_SECRET;
+if (cronSecret && req.query.key!==cronSecret) return res.status(403).json({ error:‘Invalid cron key’ });
+try {
+const { start, end, dateFormatted } = getDayRange(‘tomorrow’);
+const { shifts } = await getOrgCalendar(start, end);
+const message = formatScheduleForSlack(dateFormatted, shifts);
+const result = await postToSlack(message);
+try { await fetch(`http://localhost:${PORT}/cron/check-conflicts`, { method:‘POST’ }); } catch(e) { console.error(‘Conflict check in cron/daily:’, e.message); }
+console.log(`Cron: posted tomorrow's schedule (${dateFormatted}, ${shifts.length} shifts)`);
+res.json({ success:true, date:dateFormatted, shiftsPosted:shifts.length });
+} catch (err) { console.error(‘Cron error:’, err.message); res.status(500).json({ error: err.message }); }
 });
 
-// GET /slack/week — Post week schedule to Slack
-app.get('/slack/week', async (req, res) => {
-  try {
-    const now = new Date();
-    const startOfWeek = new Date(now);
-    startOfWeek.setDate(now.getDate() - now.getDay());
-    startOfWeek.setHours(0, 0, 0, 0);
-    const endOfWeek = new Date(startOfWeek);
-    endOfWeek.setDate(startOfWeek.getDate() + 6);
-    endOfWeek.setHours(23, 59, 59, 999);
-    
-    const { shifts } = await getOrgCalendar(startOfWeek.toISOString(), endOfWeek.toISOString());
-    
-    // Group by day
-    const byDay = {};
-    shifts.forEach(s => {
-      const day = new Date(s.start).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/Los_Angeles' });
-      if (!byDay[day]) byDay[day] = [];
-      byDay[day].push(s);
-    });
-    
-    let text = `📅 *Week Schedule (${startOfWeek.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - ${endOfWeek.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })})*\n\n`;
-    
-    for (const [day, dayShifts] of Object.entries(byDay)) {
-      const clementOnly = dayShifts.filter(s => (s.location || '').includes('Clement'));
-      text += `*${day}* (${clementOnly.length} Clement shifts)\n`;
-      clementOnly.sort((a, b) => a.start.localeCompare(b.start));
-      for (const s of clementOnly) {
-        const startTime = new Date(s.start).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
-        const endTime = new Date(s.end).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
-        text += `  ${s.employee} — ${s.position || 'TBD'} (${startTime}-${endTime})\n`;
-      }
-      text += '\n';
-    }
-    
-    const result = await postToSlack(text);
-    res.json({ success: true, message: 'Posted week schedule to Slack', slackResult: result });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+app.get(’/slack/week’, async (req, res) => {
+try {
+const now = new Date();
+const startOfWeek = new Date(now); startOfWeek.setDate(now.getDate()-now.getDay()); startOfWeek.setHours(0,0,0,0);
+const endOfWeek = new Date(startOfWeek); endOfWeek.setDate(startOfWeek.getDate()+6); endOfWeek.setHours(23,59,59,999);
+const { shifts } = await getOrgCalendar(startOfWeek.toISOString(), endOfWeek.toISOString());
+const byDay = {};
+shifts.forEach(s=>{ const day=new Date(s.start).toLocaleDateString(‘en-US’,{weekday:‘long’,month:‘short’,day:‘numeric’,timeZone:‘America/Los_Angeles’}); if(!byDay[day]) byDay[day]=[]; byDay[day].push(s); });
+let text = `\u{1F4C5} *Week Schedule (${startOfWeek.toLocaleDateString('en-US',{month:'short',day:'numeric'})} - ${endOfWeek.toLocaleDateString('en-US',{month:'short',day:'numeric'})})*\n\n`;
+for (const [day, dayShifts] of Object.entries(byDay)) {
+const clementOnly = dayShifts.filter(s=>(s.location||’’).includes(‘Clement’));
+text += `*${day}* (${clementOnly.length} Clement shifts)\n`;
+clementOnly.sort((a,b)=>a.start.localeCompare(b.start));
+for (const s of clementOnly) text += `  ${s.employee} \u{2014} ${s.position||'TBD'} (${formatTimePT(s.start)}-${formatTimePT(s.end)})\n`;
+text += ‘\n’;
+}
+const result = await postToSlack(text);
+res.json({ success:true, message:‘Posted week schedule to Slack’, slackResult:result });
+} catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ============================================================
-// SLACK EVENTS API — Interactive bot
+// SLACK EVENTS API
 // ============================================================
 
-const SLACK_SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET;
-const BOT_USER_ID = process.env.SLACK_BOT_USER_ID; // Set after install, or auto-detect
+app.post(’/slack/events’, async (req, res) => {
+if (req.body.type === ‘url_verification’) return res.json({ challenge: req.body.challenge });
+res.status(200).send(‘ok’);
 
-// Reply to a message in the same channel (threaded)
-async function replyInSlack(channel, threadTs, text) {
-  if (!SLACK_BOT_TOKEN) return null;
-  const body = { channel, text, thread_ts: threadTs };
-  const res = await fetch('https://slack.com/api/chat.postMessage', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${SLACK_BOT_TOKEN}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(body)
-  });
-  return res.json();
+const event = req.body.event;
+if (!event || event.type !== ‘message’ || event.bot_id || event.subtype) return;
+if (event.channel !== SLACK_CHANNEL) return;
+
+const text = (event.text || ‘’).toLowerCase().trim();
+
+try {
+if (text.includes(‘schedule today’) || text === ‘today’) {
+const { start, end, dateFormatted } = getDayRange(‘today’);
+const { shifts } = await getOrgCalendar(start, end);
+await postToSlack(formatScheduleForSlack(dateFormatted, shifts));
+} else if (text.includes(‘schedule tomorrow’) || text === ‘tomorrow’) {
+const { start, end, dateFormatted } = getDayRange(‘tomorrow’);
+const { shifts } = await getOrgCalendar(start, end);
+await postToSlack(formatScheduleForSlack(dateFormatted, shifts));
+} else if (text.match(/who(?:’s| is) working/)) {
+const dateMatch = text.match(/working\s+(\w+)/);
+const date = dateMatch ? dateMatch[1] : ‘today’;
+const { start, end, dateFormatted } = getDayRange(date);
+const { shifts } = await getOrgCalendar(start, end);
+const working = shifts.filter(s => s.employeeId);
+let msg = `*Working ${dateFormatted}:*\n`;
+working.forEach(s => { msg += `• ${s.employee} — ${s.position || 'TBD'} (${formatTimePT(s.start)}-${formatTimePT(s.end)})\n`; });
+if (working.length === 0) msg += ‘*No one scheduled.*’;
+await postToSlack(msg);
+} else if (text.includes(‘conflict’)) {
+const confRes = await fetch(`http://localhost:${PORT}/conflicts?days=7`);
+const conflicts = await confRes.json();
+if (conflicts.conflictCount === 0) { await postToSlack(‘✅ No schedule conflicts found for the next 7 days.’); }
+else {
+let msg = `🚨 *${conflicts.conflictCount} Conflict(s) Found*\n`;
+conflicts.conflicts.forEach(c => { msg += `• *${c.type}* — ${c.message}\n`; });
+await postToSlack(msg);
 }
-
-// Cache for user names (refreshed periodically for the coverage parser)
-global._cachedUserNames = [];
-async function refreshUserNameCache() {
-  try {
-    const users = await slingGet('/users');
-    global._cachedUserNames = users
-      .filter(u => u.active !== false)
-      .map(u => (u.name || '').toLowerCase().trim())
-      .filter(n => n.length > 0);
-    console.log(`Refreshed user name cache: ${global._cachedUserNames.length} names`);
-  } catch (e) {
-    console.error('Failed to refresh user name cache:', e.message);
-  }
+} else if (text.match(/hours\s+(?:for\s+)?(\w+)/)) {
+const match = text.match(/hours\s+(?:for\s+)?(\w+)/);
+const uid = resolveEmployeeId(match[1]);
+if (uid) {
+const hoursRes = await fetch(`http://localhost:${PORT}/weekly-hours/${uid}`);
+const data = await hoursRes.json();
+await postToSlack(`📊 *${data.employee} — This Week*\nTotal: ${data.totalHours}hrs | Clement: ${data.clementHours}hrs | 9th St: ${data.ninthStHours}hrs\nRemaining before 40hr cap: ${data.remainingBeforeOT}hrs`);
 }
-// Refresh on startup and every hour
-refreshUserNameCache();
-setInterval(refreshUserNameCache, 60 * 60 * 1000);
-
-// Parse a natural language schedule question
-function parseScheduleQuestion(text) {
-  const lower = text.toLowerCase().replace(/<[^>]+>/g, '').trim(); // Strip Slack mentions
-  
-  const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-  
-  // "who's unavailable [day]?" or "who's off [day]?" or "unavailable [day]"
-  const unavailMatch = lower.match(/(?:who(?:'s|s|\sis)\s+(?:unavailable|off|on\s+leave|out)|unavailab|time\s*off|who\s+can(?:'t|not)\s+work)\s*(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|this weekend|this week)?/i);
-  
-  // --- COVERAGE: flexible natural language parsing ---
-  // Extract any name and any day from the message for coverage queries
-  const dayWords = ['today','tomorrow','sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
-  const dayPattern = dayWords.join('|');
-  
-  // Known employee first names — pulled from cached Sling users
-  // Falls back to hardcoded list if cache not ready
-  let knownNames = [];
-  if (global._cachedUserNames && global._cachedUserNames.length > 0) {
-    knownNames = global._cachedUserNames;
-  } else {
-    knownNames = ['otilia','clayton','maya','hayden','sara','jessica','james','jesus','anya','emily','saige','brianna','david','jeffrey'];
-  }
-  
-  // Check if this is a coverage question
-  const isCoverageQ = /cover|coverage|replace|sub for|fill in|pick up|needs? (?:a )?(?:cover|sub|replacement)|who can (?:work|take|fill)|can anyone/i.test(lower);
-  
-  let coverageMatch = null;
-  if (isCoverageQ) {
-    // Find a name in the message
-    let foundName = null;
-    for (const name of knownNames) {
-      if (lower.includes(name)) { foundName = name; break; }
-    }
-    // Handle pronouns: "cover him/her/them tomorrow" — need a name mentioned earlier
-    if (!foundName && /\b(him|her|them|they)\b/.test(lower)) {
-      // Look for a name anywhere in the full original text (before pronoun resolution)
-      const fullLower = text.toLowerCase();
-      for (const name of knownNames) {
-        if (fullLower.includes(name)) { foundName = name; break; }
-      }
-    }
-    
-    // Find a day in the message
-    let foundDay = null;
-    for (const dw of dayWords) {
-      if (lower.includes(dw)) { foundDay = dw; break; }
-    }
-    // Also check for "next [day]" pattern
-    if (!foundDay) {
-      const nextDayMatch = lower.match(/next\s+(sunday|monday|tuesday|wednesday|thursday|friday|saturday)/i);
-      if (nextDayMatch) foundDay = nextDayMatch[1].toLowerCase();
-    }
-    
-    if (foundName && foundDay) {
-      coverageMatch = { name: foundName, day: foundDay };
-    } else if (foundName && !foundDay) {
-      // Default to today if no day specified
-      coverageMatch = { name: foundName, day: 'today' };
-    }
-  }
-  
-  // "who's working [day]?" or "who works [day]?"
-  const whosWorkingMatch = lower.match(/who(?:'s|s|\sis)\s+(?:working|on|scheduled)?\s*(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|this weekend|next week)?/i);
-  
-  // "schedule for [day]" or "[day] schedule"
-  const scheduleMatch = lower.match(/schedule\s+(?:for\s+)?(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|this week|next week|weekend)/i)
-    || lower.match(/(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|this week|next week|weekend)(?:'s)?\s+schedule/i);
-  
-  // "what's [day] look like?"
-  const whatsMatch = lower.match(/what(?:'s|s|\sdoes)\s+(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|this weekend)\s+look/i);
-  
-  // "week" or "this week" or "weekly schedule"
-  const weekMatch = lower.match(/(?:this\s+)?week(?:ly)?\s*(?:schedule)?|full\s+(?:week|schedule)/i);
-  
-  // "weekend" 
-  const weekendMatch = lower.match(/(?:this\s+)?weekend/i);
-  
-  // Extract the day
-  let targetDay = null;
-  
-  // Check coverage first
-  if (coverageMatch) {
-    return { type: 'coverage', employee: coverageMatch.name, day: coverageMatch.day };
-  }
-  
-  // Check unavailability
-  if (unavailMatch) {
-    targetDay = (unavailMatch[1] || 'today').toLowerCase().trim();
-    if (targetDay === 'this week') return { type: 'unavailable_week' };
-    return { type: 'unavailable', day: targetDay };
-  }
-  
-  const match = whosWorkingMatch || scheduleMatch || whatsMatch;
-  if (match) {
-    targetDay = (match[1] || 'today').toLowerCase().trim();
-  }
-  
-  if (weekMatch && !targetDay) return { type: 'week' };
-  if (weekendMatch && !targetDay) return { type: 'weekend' };
-  if (targetDay === 'this week' || targetDay === 'next week') return { type: 'week' };
-  if (targetDay === 'this weekend' || targetDay === 'weekend') return { type: 'weekend' };
-  if (targetDay) return { type: 'day', day: targetDay };
-  
-  // Fallback — check if any day name is in the text
-  for (const d of days) {
-    if (lower.includes(d)) return { type: 'day', day: d };
-  }
-  if (lower.includes('today')) return { type: 'day', day: 'today' };
-  if (lower.includes('tomorrow')) return { type: 'day', day: 'tomorrow' };
-  
-  return null;
 }
+} catch (err) { console.error(‘Slack event handler error:’, err.message); }
+});
 
-// Handle a parsed schedule question and return response text
-async function handleScheduleQuestion(parsed) {
-  if (parsed.type === 'coverage') {
-    const result = await findCoverage(parsed.day, parsed.employee);
-    
-    if (result.error) return `❌ ${result.error}`;
-    
-    const shift = result.shiftToCover;
-    const ctx = result.dayContext;
-    const st = new Date(shift.start).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
-    const et = new Date(shift.end).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
-    
-    let text = `🔄 *Coverage for ${shift.employee}'s shift on ${result.date}*\n`;
-    text += `Shift: *${shift.position || 'TBD'}* — ${st} to ${et} (${shift.hours.toFixed(1)}hrs)\n`;
-    text += `${ctx.dayName} | Store ${ctx.storeHours} (shifts ${ctx.shiftWindow})`;
-    if (ctx.isPeak) text += ` | ⚡ Peak day (~$${ctx.avgRevenue}/day, ~${ctx.avgTickets} tickets)`;
-    text += `\n`;
-    if (result.templateMatch) {
-      const tm = result.templateMatch;
-      text += `📋 Standard slot: ${tm.position} ${tm.slot} (${tm.frequency})\n`;
-    } else {
-      text += `⚠️ Non-standard shift time — not a regular template slot\n`;
-    }
-    text += `\n`;
-    
-    const available = result.candidates.filter(c => c.available);
-    const warned = result.candidates.filter(c => c.available && c.warnings.length > 0);
-    const unavailable = result.candidates.filter(c => !c.available);
-    
-    if (available.length > 0) {
-      text += `✅ *Can Cover (${available.length})*\n`;
-      for (const c of available) {
-        text += `  • *${c.employee}*`;
-        const info = [];
-        if (c.historicalAvg) info.push(`avg ${c.historicalAvg.toFixed(0)}hrs/wk`);
-        info.push(`${c.weeklyHours.toFixed(1)}→${c.projectedHours.toFixed(1)}hrs this week`);
-        text += ` — ${info.join(', ')}`;
-        if (c.warnings.length > 0) text += `\n    ⚠️ ${c.warnings.join('; ')}`;
-        text += '\n';
-      }
-      text += '\n';
-    } else {
-      text += `⚠️ *No one is available to cover this shift.*\n\n`;
-    }
-    
-    if (unavailable.length > 0) {
-      text += `🚫 *Cannot Cover (${unavailable.length})*\n`;
-      for (const c of unavailable) {
-        text += `  • ${c.employee} — ${c.reasons.join('; ')}\n`;
-      }
-    }
-    
-    return text;
-  }
+// ============================================================
+// HEALTH CHECK
+// ============================================================
 
-  if (parsed.type === 'unavailable' || parsed.type === 'unavailable_week') {
-    let startDate, endDate, label;
-    
-    if (parsed.type === 'unavailable_week') {
-      const now = new Date();
-      const startOfWeek = new Date(now);
-      startOfWeek.setDate(now.getDate() - now.getDay());
-      startOfWeek.setHours(0, 0, 0, 0);
-      const endOfWeek = new Date(startOfWeek);
-      endOfWeek.setDate(startOfWeek.getDate() + 6);
-      endOfWeek.setHours(23, 59, 59, 999);
-      startDate = startOfWeek.toISOString();
-      endDate = endOfWeek.toISOString();
-      label = 'This Week';
-    } else {
-      const range = getDayRange(parsed.day);
-      startDate = range.start;
-      endDate = range.end;
-      label = range.dateFormatted;
-    }
-    
-    const { leaves, availability, shifts } = await getOrgCalendar(startDate, endDate);
-    
-    let text = `🚫 *Unavailability for ${label}*\n\n`;
-    
-    // Time off / Leave
-    if (leaves.length > 0) {
-      text += `*On Leave / Time Off*\n`;
-      // Deduplicate by employee
-      const seen = new Set();
-      for (const l of leaves) {
-        const key = `${l.employeeId}-${l.start}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        const startDay = new Date(l.start).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/Los_Angeles' });
-        const endDay = new Date(l.end).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/Los_Angeles' });
-        const dateRange = l.fullDay ? (startDay === endDay ? startDay : `${startDay} – ${endDay}`) : `${startDay}`;
-        const note = l.note ? ` — _${l.note}_` : '';
-        text += `  • ${l.employee} (${dateRange})${note}\n`;
-      }
-      text += '\n';
-    }
-    
-    // Limited availability
-    const limited = availability.filter(a => !a.fullDay);
-    if (limited.length > 0) {
-      text += `*Limited Availability*\n`;
-      for (const a of limited) {
-        const st = new Date(a.start).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
-        const et = new Date(a.end).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
-        const day = new Date(a.start).toLocaleDateString('en-US', { weekday: 'short', timeZone: 'America/Los_Angeles' });
-        text += `  • ${a.employee} — only available ${st}-${et}` + (parsed.type === 'unavailable_week' ? ` (${day})` : '') + `\n`;
-      }
-      text += '\n';
-    }
-    
-    if (leaves.length === 0 && limited.length === 0) {
-      text += `_Everyone is available!_ ✅\n`;
-    }
-    
-    return text;
-  }
-
-  if (parsed.type === 'week') {
-    const now = new Date();
-    const startOfWeek = new Date(now);
-    startOfWeek.setDate(now.getDate() - now.getDay());
-    startOfWeek.setHours(0, 0, 0, 0);
-    const endOfWeek = new Date(startOfWeek);
-    endOfWeek.setDate(startOfWeek.getDate() + 6);
-    endOfWeek.setHours(23, 59, 59, 999);
-    
-    const { shifts } = await getOrgCalendar(startOfWeek.toISOString(), endOfWeek.toISOString());
-    const byDay = {};
-    shifts.forEach(s => {
-      const day = new Date(s.start).toLocaleDateString('en-US', { weekday: 'long', timeZone: 'America/Los_Angeles' });
-      if (!byDay[day]) byDay[day] = [];
-      byDay[day].push(s);
-    });
-    
-    let text = `📅 *This Week's Schedule*\n\n`;
-    const dayOrder = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-    for (const day of dayOrder) {
-      if (!byDay[day]) continue;
-      const clement = byDay[day].filter(s => (s.location || '').includes('Clement'));
-      if (clement.length === 0) continue;
-      text += `*${day}*\n`;
-      clement.sort((a, b) => a.start.localeCompare(b.start));
-      for (const s of clement) {
-        const st = new Date(s.start).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
-        const et = new Date(s.end).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
-        text += `  • ${s.employee} — ${s.position || 'TBD'} (${st}-${et})\n`;
-      }
-      text += '\n';
-    }
-    return text;
-  }
-  
-  if (parsed.type === 'weekend') {
-    // Get Saturday and Sunday
-    const now = new Date();
-    const dayOfWeek = now.getDay();
-    const satOffset = 6 - dayOfWeek;
-    const sat = new Date(now);
-    sat.setDate(now.getDate() + satOffset);
-    sat.setHours(0, 0, 0, 0);
-    const sunEnd = new Date(sat);
-    sunEnd.setDate(sat.getDate() + 1);
-    sunEnd.setHours(23, 59, 59, 999);
-    
-    const { shifts } = await getOrgCalendar(sat.toISOString(), sunEnd.toISOString());
-    
-    let text = `🗓️ *Weekend Schedule*\n\n`;
-    for (const dayLabel of ['Saturday', 'Sunday']) {
-      const dayShifts = shifts.filter(s => {
-        const d = new Date(s.start).toLocaleDateString('en-US', { weekday: 'long', timeZone: 'America/Los_Angeles' });
-        return d === dayLabel && (s.location || '').includes('Clement');
-      });
-      if (dayShifts.length === 0) continue;
-      text += `*${dayLabel}*\n`;
-      dayShifts.sort((a, b) => a.start.localeCompare(b.start));
-      for (const s of dayShifts) {
-        const st = new Date(s.start).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
-        const et = new Date(s.end).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
-        text += `  • ${s.employee} — ${s.position || 'TBD'} (${st}-${et})\n`;
-      }
-      text += '\n';
-    }
-    return text;
-  }
-  
-  // Single day
-  const { start, end, dateFormatted } = getDayRange(parsed.day);
-  const { shifts } = await getOrgCalendar(start, end);
-  return formatScheduleForSlack(dateFormatted, shifts);
-}
-
-// POST /slack/events — Slack Events API endpoint
-app.post('/slack/events', async (req, res) => {
-  const body = req.body;
-  
-  // URL verification challenge (Slack sends this when you first configure events)
-  if (body.type === 'url_verification') {
-    return res.json({ challenge: body.challenge });
-  }
-  
-  // Acknowledge immediately (Slack requires response within 3 seconds)
-  res.status(200).json({ ok: true });
-  
-  // Process the event asynchronously
-  try {
-    const event = body.event;
-    if (!event) return;
-    
-    // Only respond to messages (not bot messages, not edits)
-    if (event.type !== 'message') return;
-    if (event.subtype) return; // Ignore edits, joins, bot messages, etc.
-    if (event.bot_id) return; // Ignore bot messages
-    
-    // Only respond in our scheduling channel (or DMs with the bot)
-    const isSchedulingChannel = event.channel === SLACK_CHANNEL;
-    const isDM = event.channel_type === 'im';
-    if (!isSchedulingChannel && !isDM) return;
-    
-    const text = event.text || '';
-    const parsed = parseScheduleQuestion(text);
-    
-    if (!parsed) {
-      // If in DM, give a helpful hint. In channel, stay quiet for non-schedule messages.
-      if (isDM) {
-        await replyInSlack(event.channel, event.ts, 
-          `Hey! Ask me about the schedule. Try:\n• "Who's working today?"\n• "Who's off this week?"\n• "Saturday schedule"\n• "This week"\n• "Weekend"\n• "Who's unavailable Friday?"\n• "Who can cover Jessica on Friday?"`
-        );
-      }
-      return;
-    }
-    
-    const response = await handleScheduleQuestion(parsed);
-    await replyInSlack(event.channel, event.ts, response);
-    
-  } catch (err) {
-    console.error('Slack event handler error:', err.message);
-  }
+app.get(’/health’, (req, res) => {
+res.json({ status: ‘ok’, version: ‘2.0.0’, timestamp: new Date().toISOString() });
 });
 
 // ============================================================
@@ -1823,8 +1218,6 @@ app.post('/slack/events', async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Pixlcat Sling API running on port ${PORT}`);
-  console.log(`Token configured: ${SLING_TOKEN ? 'Yes' : 'No — set SLING_TOKEN env var'}`);
-  console.log(`Slack configured: ${SLACK_BOT_TOKEN ? 'Yes' : 'No — set SLACK_BOT_TOKEN env var'}`);
-  startDailyScheduler();
+console.log(`Pixlcat Sling API v2.0.0 running on port ${PORT}`);
+startDailyScheduler();
 });
