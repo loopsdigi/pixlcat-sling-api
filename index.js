@@ -1446,6 +1446,24 @@ async function replyInSlack(channel, threadTs, text) {
   return res.json();
 }
 
+// Cache for user names (refreshed periodically for the coverage parser)
+global._cachedUserNames = [];
+async function refreshUserNameCache() {
+  try {
+    const users = await slingGet('/users');
+    global._cachedUserNames = users
+      .filter(u => u.active !== false)
+      .map(u => (u.name || '').toLowerCase().trim())
+      .filter(n => n.length > 0);
+    console.log(`Refreshed user name cache: ${global._cachedUserNames.length} names`);
+  } catch (e) {
+    console.error('Failed to refresh user name cache:', e.message);
+  }
+}
+// Refresh on startup and every hour
+refreshUserNameCache();
+setInterval(refreshUserNameCache, 60 * 60 * 1000);
+
 // Parse a natural language schedule question
 function parseScheduleQuestion(text) {
   const lower = text.toLowerCase().replace(/<[^>]+>/g, '').trim(); // Strip Slack mentions
@@ -1455,10 +1473,57 @@ function parseScheduleQuestion(text) {
   // "who's unavailable [day]?" or "who's off [day]?" or "unavailable [day]"
   const unavailMatch = lower.match(/(?:who(?:'s|s|\sis)\s+(?:unavailable|off|on\s+leave|out)|unavailab|time\s*off|who\s+can(?:'t|not)\s+work)\s*(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|this weekend|this week)?/i);
   
-  // "who can cover [name] on [day]?" or "cover for [name] [day]" or "find coverage [name] [day]"
-  const coverageMatch = lower.match(/(?:who\s+can\s+cover|cover\s+(?:for\s+)?|find\s+coverage\s+(?:for\s+)?|replace\s+|sub\s+(?:for\s+)?)(\w+)\s+(?:on\s+|for\s+)?(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday)/i)
-    || lower.match(/(?:who\s+can\s+cover|cover\s+(?:for\s+)?|find\s+coverage\s+(?:for\s+)?|replace\s+|sub\s+(?:for\s+)?)(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+(?:for\s+)?(\w+)/i)
-    || lower.match(/coverage\s+(?:for\s+)?(\w+)\s+(?:on\s+)?(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday)/i);
+  // --- COVERAGE: flexible natural language parsing ---
+  // Extract any name and any day from the message for coverage queries
+  const dayWords = ['today','tomorrow','sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
+  const dayPattern = dayWords.join('|');
+  
+  // Known employee first names — pulled from cached Sling users
+  // Falls back to hardcoded list if cache not ready
+  let knownNames = [];
+  if (global._cachedUserNames && global._cachedUserNames.length > 0) {
+    knownNames = global._cachedUserNames;
+  } else {
+    knownNames = ['otilia','clayton','maya','hayden','sara','jessica','james','jesus','anya','emily','saige','brianna','david','jeffrey'];
+  }
+  
+  // Check if this is a coverage question
+  const isCoverageQ = /cover|coverage|replace|sub for|fill in|pick up|needs? (?:a )?(?:cover|sub|replacement)|who can (?:work|take|fill)|can anyone/i.test(lower);
+  
+  let coverageMatch = null;
+  if (isCoverageQ) {
+    // Find a name in the message
+    let foundName = null;
+    for (const name of knownNames) {
+      if (lower.includes(name)) { foundName = name; break; }
+    }
+    // Handle pronouns: "cover him/her/them tomorrow" — need a name mentioned earlier
+    if (!foundName && /\b(him|her|them|they)\b/.test(lower)) {
+      // Look for a name anywhere in the full original text (before pronoun resolution)
+      const fullLower = text.toLowerCase();
+      for (const name of knownNames) {
+        if (fullLower.includes(name)) { foundName = name; break; }
+      }
+    }
+    
+    // Find a day in the message
+    let foundDay = null;
+    for (const dw of dayWords) {
+      if (lower.includes(dw)) { foundDay = dw; break; }
+    }
+    // Also check for "next [day]" pattern
+    if (!foundDay) {
+      const nextDayMatch = lower.match(/next\s+(sunday|monday|tuesday|wednesday|thursday|friday|saturday)/i);
+      if (nextDayMatch) foundDay = nextDayMatch[1].toLowerCase();
+    }
+    
+    if (foundName && foundDay) {
+      coverageMatch = { name: foundName, day: foundDay };
+    } else if (foundName && !foundDay) {
+      // Default to today if no day specified
+      coverageMatch = { name: foundName, day: 'today' };
+    }
+  }
   
   // "who's working [day]?" or "who works [day]?"
   const whosWorkingMatch = lower.match(/who(?:'s|s|\sis)\s+(?:working|on|scheduled)?\s*(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|this weekend|next week)?/i);
@@ -1481,17 +1546,7 @@ function parseScheduleQuestion(text) {
   
   // Check coverage first
   if (coverageMatch) {
-    // Figure out which capture group has name vs day
-    let name, day;
-    const g1 = coverageMatch[1].toLowerCase();
-    const g2 = coverageMatch[2].toLowerCase();
-    const dayWords = ['today','tomorrow','sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
-    if (dayWords.includes(g1)) {
-      day = g1; name = g2;
-    } else {
-      name = g1; day = g2;
-    }
-    return { type: 'coverage', employee: name, day: day };
+    return { type: 'coverage', employee: coverageMatch.name, day: coverageMatch.day };
   }
   
   // Check unavailability
