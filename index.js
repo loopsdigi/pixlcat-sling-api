@@ -20,6 +20,7 @@ require('dotenv').config();
 const express = require('express');
 const crypto = require('crypto');
 const cors = require('cors');
+const { handleWithClaude } = require('./claude-nlp');
 
 // Node 18+ has global fetch. For older Node, install node-fetch and uncomment:
 // const fetch = global.fetch || require('node-fetch');
@@ -2476,6 +2477,20 @@ app.post('/slack/events', async (req, res) => {
   const threadTs = event.ts;
 
   console.log(`[events] Received message: "${text}"`);
+
+    // --- Try Claude NLP first (if ANTHROPIC_API_KEY is set) ---
+    if (process.env.ANTHROPIC_API_KEY) {
+      try {
+        const claudeResponse = await handleWithClaude(event.text || '');
+        if (claudeResponse) {
+          await replyInSlack(channel, threadTs, claudeResponse);
+          console.log(`[events] Claude NLP responded`);
+          return;
+        }
+      } catch (err) {
+        console.error('[events] Claude NLP failed, falling back to regex:', err.message);
+      }
+    }
 
   // --- Helper: detect which day the user means ---
   function detectDay(input) {
