@@ -501,4 +501,243 @@ async function handleOpsQuery(messageText, channel, threadTs) {
   }
 }
 
-module.exports = { handleOpsQuery, determineDateRange, detectLocation, fetchAllData, askClaude };
+module.exports = { handleOpsQuery, determineDateRange, detectLocation, fetchAllData, askClaude, generateWeeklyReport };
+
+
+// ── Weekly Report Generator ──────────────────────────────────────────────────
+
+async function generateWeeklyReport() {
+  if (!ANTHROPIC_API_KEY) {
+    console.error('[weekly] No ANTHROPIC_API_KEY');
+    return null;
+  }
+
+  const now = new Date();
+  const pst = new Date(now.toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }));
+  const today = new Date(pst.getFullYear(), pst.getMonth(), pst.getDate());
+  const addDays = (d, n) => new Date(d.getTime() + n * 86400000);
+  const fmt = (d) => d.toLocaleDateString('en-CA');
+
+  // Last week = Mon-Sun ending yesterday (or most recent Sunday)
+  const dow = today.getDay();
+  const lastSunday = addDays(today, dow === 0 ? -7 : -dow);
+  const lastMonday = addDays(lastSunday, -6);
+  
+  // Previous week = the week before last
+  const prevSunday = addDays(lastMonday, -1);
+  const prevMonday = addDays(prevSunday, -6);
+
+  console.log(`[weekly] Last week: ${fmt(lastMonday)} to ${fmt(lastSunday)}`);
+  console.log(`[weekly] Prev week: ${fmt(prevMonday)} to ${fmt(prevSunday)}`);
+
+  // Fetch raw data for both weeks, both locations
+  const lastWeekSF = [];
+  const lastWeekBOS = [];
+  const prevWeekSF = [];
+  const prevWeekBOS = [];
+
+  for (let i = 0; i < 7; i++) {
+    const lwDate = fmt(addDays(lastMonday, i));
+    const pwDate = fmt(addDays(prevMonday, i));
+
+    const [lwToast, lwSquare, pwToast, pwSquare] = await Promise.all([
+      fetchToastData(lwDate),
+      fetchSquareData(lwDate),
+      fetchToastData(pwDate),
+      fetchSquareData(pwDate),
+    ]);
+
+    lastWeekSF.push({ date: lwDate, data: lwToast });
+    lastWeekBOS.push({ date: lwDate, data: lwSquare });
+    prevWeekSF.push({ date: pwDate, data: pwToast });
+    prevWeekBOS.push({ date: pwDate, data: pwSquare });
+  }
+
+  // Aggregate weekly totals
+  function aggregateToast(days) {
+    let sales = 0, tickets = 0, mochiCount = 0, mochiRev = 0, mochiTxns = 0, hours = 0, totalTxns = 0;
+    const dailyData = [];
+    const flavorTotals = {};
+
+    for (const { date, data } of days) {
+      if (!data) continue;
+      const m = data.metrics;
+      const daySales = m.net_sales || 0;
+      sales += daySales;
+      tickets += m.transaction_count || 0;
+      totalTxns += m.transaction_count || 0;
+      hours += m.labor?.total_hours || 0;
+      mochiCount += m.mochi?.total_count || 0;
+      mochiRev += m.mochi?.total_revenue || 0;
+      mochiTxns += m.mochi?.transactions_with_mochi || 0;
+
+      if (m.mochi?.by_flavor) {
+        for (const [name, d] of Object.entries(m.mochi.by_flavor)) {
+          if (!flavorTotals[name]) flavorTotals[name] = { count: 0, revenue: 0 };
+          flavorTotals[name].count += d.count || 0;
+          flavorTotals[name].revenue += d.revenue || 0;
+        }
+      }
+
+      const dayName = new Date(date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short' });
+      dailyData.push({ date, dayName, sales: daySales, mochi_att: m.mochi?.attachment_rate || 0, splh: m.splh || 0 });
+    }
+
+    const avgCheck = tickets > 0 ? sales / tickets : 0;
+    const splh = hours > 0 ? sales / hours : 0;
+    const mochiAtt = totalTxns > 0 ? (mochiTxns / totalTxns * 100) : 0;
+
+    return { sales, tickets, avgCheck, splh, hours, mochiCount, mochiRev, mochiAtt, mochiTxns, dailyData, flavorTotals, daysWithData: days.filter(d => d.data).length };
+  }
+
+  function aggregateSquare(days) {
+    let sales = 0, orders = 0, mochiCount = 0, mochiRev = 0, mochiOrders = 0, hours = 0, laborCost = 0;
+    const dailyData = [];
+    const flavorTotals = {};
+
+    for (const { date, data } of days) {
+      if (!data) continue;
+      const m = data.metrics;
+      const daySales = m.net_sales || 0;
+      sales += daySales;
+      orders += m.total_orders || 0;
+      hours += data.labor?.total_hours || 0;
+      laborCost += data.labor?.total_labor_cost || 0;
+      mochiCount += m.mochi?.total_mochi_items || 0;
+      mochiRev += m.mochi?.mochi_revenue || 0;
+      mochiOrders += m.mochi?.orders_with_mochi || 0;
+
+      if (m.mochi?.flavors) {
+        for (const [name, d] of Object.entries(m.mochi.flavors)) {
+          if (!flavorTotals[name]) flavorTotals[name] = { count: 0, revenue: 0 };
+          flavorTotals[name].count += d.count || 0;
+          flavorTotals[name].revenue += d.revenue || 0;
+        }
+      }
+
+      const dayName = new Date(date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short' });
+      dailyData.push({ date, dayName, sales: daySales, mochi_att: m.mochi?.attachment_rate || 0, splh: data.splh?.splh || 0 });
+    }
+
+    const avgCheck = orders > 0 ? sales / orders : 0;
+    const splh = hours > 0 ? sales / hours : 0;
+    const mochiAtt = orders > 0 ? (mochiOrders / orders * 100) : 0;
+
+    return { sales, orders, avgCheck, splh, hours, laborCost, mochiCount, mochiRev, mochiAtt, mochiOrders, dailyData, flavorTotals, daysWithData: days.filter(d => d.data).length };
+  }
+
+  const lwSF = aggregateToast(lastWeekSF);
+  const pwSF = aggregateToast(prevWeekSF);
+  const lwBOS = aggregateSquare(lastWeekBOS);
+  const pwBOS = aggregateSquare(prevWeekBOS);
+
+  // Build context string for Claude
+  const lwLabel = `${lastMonday.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} – ${lastSunday.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
+  const pwLabel = `${prevMonday.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} – ${prevSunday.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
+
+  let context = `=== WEEKLY REPORT DATA ===\n`;
+  context += `Last Week: ${lwLabel} | Previous Week: ${pwLabel}\n\n`;
+
+  context += `--- SF LAST WEEK (${lwLabel}) ---\n`;
+  context += `Total Sales: $${lwSF.sales.toFixed(2)} (${lwSF.daysWithData} days with data)\n`;
+  context += `Tickets: ${lwSF.tickets} | Avg Check: $${lwSF.avgCheck.toFixed(2)}\n`;
+  context += `SPLH: $${lwSF.splh.toFixed(2)} | Labor Hours: ${lwSF.hours.toFixed(1)}h\n`;
+  context += `Mochi: ${lwSF.mochiCount} pieces, $${lwSF.mochiRev.toFixed(2)} rev, ${lwSF.mochiAtt.toFixed(1)}% attachment\n`;
+  context += `Daily: ${lwSF.dailyData.map(d => `${d.dayName} $${d.sales.toFixed(0)}`).join(', ')}\n`;
+  context += `Top Flavors: ${Object.entries(lwSF.flavorTotals).sort((a, b) => b[1].count - a[1].count).map(([n, d]) => `${n}(${d.count})`).join(', ')}\n\n`;
+
+  context += `--- SF PREVIOUS WEEK (${pwLabel}) ---\n`;
+  context += `Total Sales: $${pwSF.sales.toFixed(2)} (${pwSF.daysWithData} days with data)\n`;
+  context += `Tickets: ${pwSF.tickets} | Avg Check: $${pwSF.avgCheck.toFixed(2)}\n`;
+  context += `SPLH: $${pwSF.splh.toFixed(2)} | Labor Hours: ${pwSF.hours.toFixed(1)}h\n`;
+  context += `Mochi: ${pwSF.mochiCount} pieces, $${pwSF.mochiRev.toFixed(2)} rev, ${pwSF.mochiAtt.toFixed(1)}% attachment\n`;
+  context += `Daily: ${pwSF.dailyData.map(d => `${d.dayName} $${d.sales.toFixed(0)}`).join(', ')}\n\n`;
+
+  context += `--- BOSTON LAST WEEK (${lwLabel}) ---\n`;
+  context += `Total Sales: $${lwBOS.sales.toFixed(2)} (${lwBOS.daysWithData} days with data)\n`;
+  context += `Orders: ${lwBOS.orders} | Avg Check: $${lwBOS.avgCheck.toFixed(2)}\n`;
+  context += `SPLH: $${lwBOS.splh.toFixed(2)} | Labor Hours: ${lwBOS.hours.toFixed(1)}h | Labor Cost: $${lwBOS.laborCost.toFixed(2)}\n`;
+  context += `Mochi: ${lwBOS.mochiCount} pieces, $${lwBOS.mochiRev.toFixed(2)} rev, ${lwBOS.mochiAtt.toFixed(1)}% attachment\n`;
+  context += `Daily: ${lwBOS.dailyData.map(d => `${d.dayName} $${d.sales.toFixed(0)}`).join(', ')}\n`;
+  context += `Top Flavors: ${Object.entries(lwBOS.flavorTotals).sort((a, b) => b[1].count - a[1].count).map(([n, d]) => `${n}(${d.count})`).join(', ')}\n\n`;
+
+  context += `--- BOSTON PREVIOUS WEEK (${pwLabel}) ---\n`;
+  context += `Total Sales: $${pwBOS.sales.toFixed(2)} (${pwBOS.daysWithData} days with data)\n`;
+  context += `Orders: ${pwBOS.orders} | Avg Check: $${pwBOS.avgCheck.toFixed(2)}\n`;
+  context += `SPLH: $${pwBOS.splh.toFixed(2)} | Labor Hours: ${pwBOS.hours.toFixed(1)}h | Labor Cost: $${pwBOS.laborCost.toFixed(2)}\n`;
+  context += `Mochi: ${pwBOS.mochiCount} pieces, $${pwBOS.mochiRev.toFixed(2)} rev, ${pwBOS.mochiAtt.toFixed(1)}% attachment\n`;
+  context += `Daily: ${pwBOS.dailyData.map(d => `${d.dayName} $${d.sales.toFixed(0)}`).join(', ')}\n\n`;
+
+  context += `--- COMBINED TOTALS ---\n`;
+  context += `Last Week Combined Sales: $${(lwSF.sales + lwBOS.sales).toFixed(2)}\n`;
+  context += `Previous Week Combined Sales: $${(pwSF.sales + pwBOS.sales).toFixed(2)}\n`;
+  context += `Last Week Combined Mochi: ${lwSF.mochiCount + lwBOS.mochiCount} pieces, $${(lwSF.mochiRev + lwBOS.mochiRev).toFixed(2)}\n`;
+
+  // Ask Claude to generate the report
+  const reportPrompt = `Generate a weekly performance report comparing last week to the previous week. Use ONLY Slack mrkdwn formatting (NEVER use # headers).
+
+Format it like this structure:
+
+*📊 WEEKLY REPORT — [last week date range]*
+
+*☕ SF / SAN FRANCISCO*
+Use a table-like format showing key metrics with WoW (week-over-week) deltas:
+- Net Sales with $ and % change
+- Tickets/Orders with change  
+- Avg Check with change
+- SPLH with change
+- Mochi attachment % with change
+- Mochi count & revenue with change
+- Best and worst day of the week
+- Top 3 mochi flavors
+
+*🦞 BOSTON / CHARLESTOWN*
+Same format as SF
+
+*📈 COMBINED / COMPANY-WIDE*
+- Total combined sales with WoW change
+- Total mochi pieces and revenue
+- Which location grew more
+
+*🎯 KEY TAKEAWAYS*
+- 3-4 bullet points: wins, concerns, and one action item
+- Be specific with numbers
+- Flag any metric that moved more than ±10% WoW`;
+
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 3000,
+        system: `You are the Pixlcat business intelligence assistant. Generate a weekly performance report for the CEO. Use ONLY Slack mrkdwn formatting — NEVER use markdown headers (#, ##). Use *bold* with emoji for section headers. Use 🟢 for improvements and 🔴 for declines. Be analytical and specific.
+
+BENCHMARKS:
+SF: Weekday avg $1,807/day, Weekend avg $3,610/day, SPLH $96 weekday/$111 weekend
+Boston: Weekday avg $500/day, Weekend avg $800/day, SPLH $25 weekday/$40 weekend
+Mochi target: 25% attachment rate at both locations
+
+DATA:
+${context}`,
+        messages: [{ role: 'user', content: reportPrompt }],
+      }),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      console.error(`[weekly] Claude API error: ${res.status} - ${errText}`);
+      return null;
+    }
+
+    const data = await res.json();
+    return data.content[0].text;
+  } catch (e) {
+    console.error('[weekly] Claude error:', e.message);
+    return null;
+  }
+}

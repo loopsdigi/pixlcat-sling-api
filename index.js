@@ -21,7 +21,7 @@ const express = require('express');
 const crypto = require('crypto');
 const cors = require('cors');
 const { handleWithClaude } = require('./claude-nlp');
-const { handleOpsQuery } = require('./claude-ops');
+const { handleOpsQuery, generateWeeklyReport } = require('./claude-ops');
 
 // Node 18+ has global fetch. For older Node, install node-fetch and uncomment:
 // const fetch = global.fetch || require('node-fetch');
@@ -542,6 +542,7 @@ app.get('/', (req, res) => {
       'GET /cron/daily': 'External cron endpoint',
       'GET /cron/labor-alert-sf': 'SF labor alert (7pm PST) — clock-out & overtime check',
       'GET /cron/labor-alert-boston': 'Boston labor alert (7pm EST) — clock-out & overtime check',
+      'GET /cron/weekly-report': 'Weekly WoW performance report to ops channel (Monday 8am)',
       'POST /slack/events': 'Slack Events API handler',
       'POST /command': 'Natural language processor (API key required)',
     },
@@ -2456,6 +2457,39 @@ app.get('/slack/week', async (req, res) => {
 
     res.json({ success: true, message: 'Posted week schedule to Slack', slackResult: result });
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================
+// WEEKLY REPORT — WoW comparison posted to ops channel
+// ============================================================
+
+app.get('/cron/weekly-report', async (req, res) => {
+  const cronSecret = process.env.CRON_SECRET;
+  if (cronSecret && req.query.key !== cronSecret) return res.status(403).json({ error: 'Invalid cron key' });
+
+  try {
+    const report = await generateWeeklyReport();
+    if (!report) {
+      return res.status(500).json({ error: 'Failed to generate weekly report' });
+    }
+
+    // Post to ops channel
+    if (SLACK_BOT_TOKEN) {
+      const slackRes = await fetch('https://slack.com/api/chat.postMessage', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${SLACK_BOT_TOKEN}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channel: OPS_CHANNEL, text: report, mrkdwn: true, unfurl_links: false }),
+      });
+      const result = await slackRes.json();
+      if (!result.ok) console.error('[weekly] Slack post error:', result.error);
+    }
+
+    console.log('[weekly] Report posted to ops channel');
+    res.json({ success: true, message: 'Weekly report posted' });
+  } catch (err) {
+    console.error('[weekly] Error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
