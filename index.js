@@ -540,6 +540,8 @@ app.get('/', (req, res) => {
       'GET /slack/tomorrow': 'Post tomorrow schedule to Slack',
       'GET /slack/week': 'Post week schedule to Slack',
       'GET /cron/daily': 'External cron endpoint',
+      'GET /cron/labor-alert-sf': 'SF labor alert (7pm PST) — clock-out & overtime check',
+      'GET /cron/labor-alert-boston': 'Boston labor alert (7pm EST) — clock-out & overtime check',
       'POST /slack/events': 'Slack Events API handler',
       'POST /command': 'Natural language processor (API key required)',
     },
@@ -2454,6 +2456,121 @@ app.get('/slack/week', async (req, res) => {
 
     res.json({ success: true, message: 'Posted week schedule to Slack', slackResult: result });
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================
+// LABOR ALERTS — Clock-out & overtime checks
+// ============================================================
+
+// SF Labor Alert — call at 7pm PST via cron
+app.get('/cron/labor-alert-sf', async (req, res) => {
+  const cronSecret = process.env.CRON_SECRET;
+  if (cronSecret && req.query.key !== cronSecret) return res.status(403).json({ error: 'Invalid cron key' });
+
+  try {
+    const now = new Date();
+    const pst = new Date(now.toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }));
+    const todayStr = pst.toLocaleDateString('en-CA');
+
+    const toastRes = await fetch(`${process.env.TOAST_API_URL || 'https://toast-api-1.onrender.com'}/sales?date=${todayStr}`);
+    if (!toastRes.ok) throw new Error('Toast API error: ' + toastRes.status);
+    const data = await toastRes.json();
+
+    const labor = data.metrics?.labor || {};
+    const shifts = labor.shifts || [];
+    const alerts = [];
+
+    // Check for still clocked in
+    for (const s of shifts) {
+      if (s.clock_out === 'Still clocked in' || !s.clock_out) {
+        const clockIn = new Date(s.clock_in);
+        const hoursIn = (now - clockIn) / 3600000;
+        alerts.push(`🚨 *${s.employee}* is still clocked in (${hoursIn.toFixed(1)}h since ${clockIn.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' })})`);
+      }
+    }
+
+    // Check for 8+ hours
+    for (const s of shifts) {
+      if ((s.hours || 0) >= 8) {
+        alerts.push(`⚠️ *${s.employee}* worked ${s.hours.toFixed(1)}h today (overtime threshold)`);
+      }
+    }
+
+    if (alerts.length > 0) {
+      const dateLabel = pst.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+      const msg = `*☕ SF Labor Alert — ${dateLabel}*\n\n${alerts.join('\n')}`;
+      await postToSlack(msg);
+      console.log(`[labor-alert-sf] Posted ${alerts.length} alerts`);
+      res.json({ success: true, alerts: alerts.length });
+    } else {
+      console.log('[labor-alert-sf] No alerts');
+      res.json({ success: true, alerts: 0, message: 'No issues detected' });
+    }
+  } catch (err) {
+    console.error('[labor-alert-sf] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Boston Labor Alert — call at 7pm EST via cron
+app.get('/cron/labor-alert-boston', async (req, res) => {
+  const cronSecret = process.env.CRON_SECRET;
+  if (cronSecret && req.query.key !== cronSecret) return res.status(403).json({ error: 'Invalid cron key' });
+
+  try {
+    const now = new Date();
+    const est = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    const todayStr = est.toLocaleDateString('en-CA');
+    const BOSTON_CHANNEL = 'C0AEMSHAD54';
+
+    const squareRes = await fetch(`${process.env.SQUARE_API_URL || 'https://square-api-mi4f.onrender.com'}/sales/${todayStr}`);
+    if (!squareRes.ok) throw new Error('Square API error: ' + squareRes.status);
+    const data = await squareRes.json();
+
+    const team = data.labor?.team || {};
+    const alerts = [];
+
+    // Check for 8+ hours
+    for (const [name, info] of Object.entries(team)) {
+      if ((info.hours || 0) >= 8) {
+        alerts.push(`⚠️ *${name}* worked ${info.hours.toFixed(1)}h today (overtime threshold)`);
+      }
+    }
+
+    // Note: Square doesn't expose "still clocked in" status the same way Toast does.
+    // If total hours seem unusually high (12+), flag it as potential forgot-to-clock-out.
+    for (const [name, info] of Object.entries(team)) {
+      if ((info.hours || 0) >= 12) {
+        alerts.push(`🚨 *${name}* has ${info.hours.toFixed(1)}h logged — may have forgotten to clock out`);
+      }
+    }
+
+    if (alerts.length > 0) {
+      const dateLabel = est.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+      const msg = `*🦞 Boston Labor Alert — ${dateLabel}*\n\n${alerts.join('\n')}`;
+
+      // Post to Boston scheduling channel via Square bot token
+      const bostonBotToken = process.env.SQUARE_SLACK_BOT_TOKEN;
+      if (bostonBotToken) {
+        await fetch('https://slack.com/api/chat.postMessage', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${bostonBotToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ channel: BOSTON_CHANNEL, text: msg, mrkdwn: true }),
+        });
+      } else {
+        console.warn('[labor-alert-boston] No SQUARE_SLACK_BOT_TOKEN set, cannot post alert');
+      }
+
+      console.log(`[labor-alert-boston] Posted ${alerts.length} alerts`);
+      res.json({ success: true, alerts: alerts.length });
+    } else {
+      console.log('[labor-alert-boston] No alerts');
+      res.json({ success: true, alerts: 0, message: 'No issues detected' });
+    }
+  } catch (err) {
+    console.error('[labor-alert-boston] Error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
