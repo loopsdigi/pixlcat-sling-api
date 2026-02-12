@@ -455,6 +455,14 @@ function getDayRange(dateStr) {
   };
 }
 
+// Filter shifts to only those starting on a specific date (PT)
+function filterShiftsByDate(shifts, isoDate) {
+  return shifts.filter(s => {
+    const shiftDate = new Date(s.start).toLocaleDateString('en-CA', { timeZone: TZ });
+    return shiftDate === isoDate;
+  });
+}
+
 function toISODatePT(d) {
   const dt = d instanceof Date ? d : new Date(d);
   return dt.toLocaleDateString('en-CA', { timeZone: TZ });
@@ -614,8 +622,9 @@ app.get('/shifts', async (req, res) => {
 
 app.get('/shifts/today', async (req, res) => {
   try {
-    const { start, end, dateFormatted } = getDayRange('today');
-    const { shifts } = await getOrgCalendar(start, end);
+    const { start, end, dateFormatted, isoDate } = getDayRange('today');
+    const { shifts: rawShifts } = await getOrgCalendar(start, end);
+    const shifts = filterShiftsByDate(rawShifts, isoDate);
     res.json({ date: dateFormatted, count: shifts.length, shifts });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -658,9 +667,11 @@ app.get('/shifts/week', async (req, res) => {
 
 app.get('/schedule/:date', async (req, res) => {
   try {
-    const { start, end, dateFormatted } = getDayRange(req.params.date);
+    const { start, end, dateFormatted, isoDate } = getDayRange(req.params.date);
     const { shifts } = await getOrgCalendar(start, end);
-    res.json({ date: dateFormatted, count: shifts.length, shifts });
+    // Filter to only shifts that START on the target date (PT)
+    const filtered = filterShiftsByDate(shifts, isoDate);
+    res.json({ date: dateFormatted, count: filtered.length, shifts: filtered });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -677,8 +688,9 @@ app.get('/whos-working', async (req, res) => {
 
 app.get('/whos-working/:date', async (req, res) => {
   try {
-    const { start, end, dateFormatted } = getDayRange(req.params.date);
-    const { shifts } = await getOrgCalendar(start, end);
+    const { start, end, dateFormatted, isoDate } = getDayRange(req.params.date);
+    const { shifts: rawShifts } = await getOrgCalendar(start, end);
+    const shifts = filterShiftsByDate(rawShifts, isoDate);
 
     const working = shifts
       .filter((s) => s.employeeId)
@@ -2321,8 +2333,9 @@ function startDailyScheduler() {
       console.log("Daily scheduler: posting tomorrow's schedule...");
 
       try {
-        const { start, end, dateFormatted } = getDayRange('tomorrow');
-        const { shifts } = await getOrgCalendar(start, end);
+        const { start, end, dateFormatted, isoDate } = getDayRange('tomorrow');
+        const { shifts: rawShifts } = await getOrgCalendar(start, end);
+        const shifts = filterShiftsByDate(rawShifts, isoDate);
 
         const { text, blocks } = formatScheduleBlocks(dateFormatted, shifts);
         const result = await postToSlack(text, blocks);
@@ -2350,8 +2363,9 @@ function startDailyScheduler() {
 
 app.get('/slack/daily', async (req, res) => {
   try {
-    const { start, end, dateFormatted } = getDayRange('today');
-    const { shifts } = await getOrgCalendar(start, end);
+    const { start, end, dateFormatted, isoDate } = getDayRange('today');
+    const { shifts: rawShifts } = await getOrgCalendar(start, end);
+    const shifts = filterShiftsByDate(rawShifts, isoDate);
     const { text, blocks } = formatScheduleBlocks(dateFormatted, shifts);
     const result = await postToSlack(text, blocks);
     res.json({ success: true, message: 'Posted daily schedule to Slack', slackResult: result });
@@ -2362,8 +2376,9 @@ app.get('/slack/daily', async (req, res) => {
 
 app.get('/slack/tomorrow', async (req, res) => {
   try {
-    const { start, end, dateFormatted } = getDayRange('tomorrow');
-    const { shifts } = await getOrgCalendar(start, end);
+    const { start, end, dateFormatted, isoDate } = getDayRange('tomorrow');
+    const { shifts: rawShifts } = await getOrgCalendar(start, end);
+    const shifts = filterShiftsByDate(rawShifts, isoDate);
     const { text, blocks } = formatScheduleBlocks(dateFormatted, shifts);
     const result = await postToSlack(text, blocks);
     res.json({ success: true, message: 'Posted tomorrow schedule to Slack', slackResult: result });
@@ -2377,8 +2392,9 @@ app.get('/cron/daily', async (req, res) => {
   if (cronSecret && req.query.key !== cronSecret) return res.status(403).json({ error: 'Invalid cron key' });
 
   try {
-    const { start, end, dateFormatted } = getDayRange('tomorrow');
-    const { shifts } = await getOrgCalendar(start, end);
+    const { start, end, dateFormatted, isoDate } = getDayRange('tomorrow');
+    const { shifts: rawShifts } = await getOrgCalendar(start, end);
+    const shifts = filterShiftsByDate(rawShifts, isoDate);
 
     const { text, blocks } = formatScheduleBlocks(dateFormatted, shifts);
     await postToSlack(text, blocks);
@@ -2491,8 +2507,9 @@ app.post('/slack/events', async (req, res) => {
     // Matches: "who's off", "who's unavailable", "who is off tomorrow"
     } else if (/who(?:'?s| is)\s+(?:off|unavailable|not working|not scheduled)/.test(text)) {
       const day = detectDay(text);
-      const { start, end, dateFormatted } = getDayRange(day);
-      const { shifts } = await getOrgCalendar(start, end);
+      const { start, end, dateFormatted, isoDate } = getDayRange(day);
+      const { shifts: rawShifts } = await getOrgCalendar(start, end);
+      const shifts = filterShiftsByDate(rawShifts, isoDate);
       const workingIds = new Set(shifts.filter((s) => s.employeeId).map((s) => s.employeeId));
 
       // Get all active employees
@@ -2511,8 +2528,9 @@ app.post('/slack/events', async (req, res) => {
     //          "who works today", "who's on today", "who's in tomorrow"
     } else if (/who(?:'?s| is| works)\s+(?:working|on|in|scheduled)/.test(text)) {
       const day = detectDay(text);
-      const { start, end, dateFormatted } = getDayRange(day);
-      const { shifts } = await getOrgCalendar(start, end);
+      const { start, end, dateFormatted, isoDate } = getDayRange(day);
+      const { shifts: rawShifts } = await getOrgCalendar(start, end);
+      const shifts = filterShiftsByDate(rawShifts, isoDate);
       const working = shifts.filter((s) => s.employeeId);
       const { text: fallback, blocks } = formatWhosWorkingBlocks(dateFormatted, working);
       await replyInSlack(channel, threadTs, fallback, blocks);
@@ -2643,8 +2661,9 @@ app.post('/slack/events', async (req, res) => {
     } else if (/schedule|what(?:'?s)?\s+(?:the\s+)?(?:\w+\s+)?(?:look|sched)/.test(text) ||
         text === 'today' || text === 'tomorrow' || text === 'tmr' || text === 'tmrw') {
       const day = detectDay(text);
-      const { start, end, dateFormatted } = getDayRange(day);
-      const { shifts } = await getOrgCalendar(start, end);
+      const { start, end, dateFormatted, isoDate } = getDayRange(day);
+      const { shifts: rawShifts } = await getOrgCalendar(start, end);
+      const shifts = filterShiftsByDate(rawShifts, isoDate);
       const { text: fallback, blocks } = formatScheduleBlocks(dateFormatted, shifts);
       await replyInSlack(channel, threadTs, fallback, blocks);
       console.log(`[events] Posted schedule for ${day}`);
