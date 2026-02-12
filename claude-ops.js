@@ -135,7 +135,7 @@ function detectLocation(text) {
 
 async function fetchToastData(date) {
   try {
-    const res = await fetch(`${TOAST_URL}/sales/${date}`);
+    const res = await fetch(`${TOAST_URL}/sales?date=${date}`);
     if (!res.ok) return null;
     const data = await res.json();
     if (data.status !== 'success') return null;
