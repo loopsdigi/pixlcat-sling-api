@@ -742,6 +742,199 @@ app.post('/auth/login', async (req, res) => {
 });
 
 // ============================================================
+// SLACK INTEGRATION
+// ============================================================
+
+const SLACK_CHANNEL = 'C0AELGYN2LC'; // #sling-scheduling-san-francisco
+const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
+
+// Simple daily scheduler — checks every minute, fires once at target hour
+let _lastPostedDate = null;
+function startDailyScheduler() {
+  if (!SLACK_BOT_TOKEN && !process.env.SLACK_WEBHOOK_URL) {
+    console.log('No Slack credentials set, daily scheduler disabled');
+    return;
+  }
+  const POST_HOUR = 17; // 5pm Pacific
+  
+  setInterval(async () => {
+    const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }));
+    const today = now.toDateString();
+    
+    if (now.getHours() === POST_HOUR && _lastPostedDate !== today) {
+      _lastPostedDate = today;
+      console.log('Daily scheduler: posting tomorrow\'s schedule...');
+      try {
+        const { start, end, dateFormatted } = getDayRange('tomorrow');
+        const { shifts } = await getOrgCalendar(start, end);
+        const message = formatScheduleForSlack(dateFormatted, shifts);
+        const result = await postToSlack(message);
+        console.log('Daily scheduler: posted successfully', result?.ok);
+      } catch (err) {
+        console.error('Daily scheduler error:', err.message);
+      }
+    }
+  }, 60 * 1000); // Check every minute
+  
+  console.log(`Daily scheduler: will post tomorrow's schedule at ${POST_HOUR}:00 PT`);
+}
+
+async function postToSlack(text, blocks) {
+  // Support both webhook URL and bot token
+  const webhookUrl = process.env.SLACK_WEBHOOK_URL;
+  const botToken = SLACK_BOT_TOKEN;
+  
+  if (webhookUrl) {
+    const res = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text })
+    });
+    return { ok: res.ok, status: res.status };
+  }
+  
+  if (botToken) {
+    const body = { channel: SLACK_CHANNEL, text };
+    if (blocks) body.blocks = blocks;
+    const res = await fetch('https://slack.com/api/chat.postMessage', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${botToken}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(body)
+    });
+    return res.json();
+  }
+  
+  console.log('No Slack credentials configured, skipping post');
+  return null;
+}
+
+// Format a schedule into a Slack message
+function formatScheduleForSlack(dateStr, shifts) {
+  const clementShifts = shifts.filter(s => (s.location || '').includes('Clement'));
+  const ninthShifts = shifts.filter(s => (s.location || '').includes('9th'));
+  
+  let text = `📋 *Schedule for ${dateStr}*\n\n`;
+  
+  if (clementShifts.length > 0) {
+    text += `*Clement Pixlcat* (${clementShifts.length} shifts)\n`;
+    // Sort by start time
+    clementShifts.sort((a, b) => a.start.localeCompare(b.start));
+    for (const s of clementShifts) {
+      const startTime = new Date(s.start).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
+      const endTime = new Date(s.end).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
+      text += `  • ${s.employee} — ${s.position || 'TBD'} (${startTime} - ${endTime})\n`;
+    }
+  }
+  
+  if (ninthShifts.length > 0) {
+    text += `\n*9th St Pixlcat* (${ninthShifts.length} shifts)\n`;
+    ninthShifts.sort((a, b) => a.start.localeCompare(b.start));
+    for (const s of ninthShifts) {
+      const startTime = new Date(s.start).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
+      const endTime = new Date(s.end).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
+      text += `  • ${s.employee} — ${s.position || 'TBD'} (${startTime} - ${endTime})\n`;
+    }
+  }
+  
+  if (shifts.length === 0) {
+    text += '_No shifts scheduled._\n';
+  }
+  
+  return text;
+}
+
+// GET /slack/daily — Post today's schedule to Slack
+app.get('/slack/daily', async (req, res) => {
+  try {
+    const { start, end, dateFormatted } = getDayRange('today');
+    const { shifts } = await getOrgCalendar(start, end);
+    const message = formatScheduleForSlack(dateFormatted, shifts);
+    const result = await postToSlack(message);
+    res.json({ success: true, message: 'Posted daily schedule to Slack', slackResult: result });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /slack/tomorrow — Post tomorrow's schedule to Slack
+app.get('/slack/tomorrow', async (req, res) => {
+  try {
+    const { start, end, dateFormatted } = getDayRange('tomorrow');
+    const { shifts } = await getOrgCalendar(start, end);
+    const message = formatScheduleForSlack(dateFormatted, shifts);
+    const result = await postToSlack(message);
+    res.json({ success: true, message: 'Posted tomorrow\'s schedule to Slack', slackResult: result });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /cron/daily — External cron hits this at 5pm PT to post tomorrow's schedule
+// Secured with a simple secret token
+app.get('/cron/daily', async (req, res) => {
+  const cronSecret = process.env.CRON_SECRET;
+  if (cronSecret && req.query.key !== cronSecret) {
+    return res.status(403).json({ error: 'Invalid cron key' });
+  }
+  try {
+    const { start, end, dateFormatted } = getDayRange('tomorrow');
+    const { shifts } = await getOrgCalendar(start, end);
+    const message = formatScheduleForSlack(dateFormatted, shifts);
+    const result = await postToSlack(message);
+    console.log(`Cron: posted tomorrow's schedule (${dateFormatted}, ${shifts.length} shifts)`);
+    res.json({ success: true, date: dateFormatted, shiftsPosted: shifts.length });
+  } catch (err) {
+    console.error('Cron error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /slack/week — Post week schedule to Slack
+app.get('/slack/week', async (req, res) => {
+  try {
+    const now = new Date();
+    const startOfWeek = new Date(now);
+    startOfWeek.setDate(now.getDate() - now.getDay());
+    startOfWeek.setHours(0, 0, 0, 0);
+    const endOfWeek = new Date(startOfWeek);
+    endOfWeek.setDate(startOfWeek.getDate() + 6);
+    endOfWeek.setHours(23, 59, 59, 999);
+    
+    const { shifts } = await getOrgCalendar(startOfWeek.toISOString(), endOfWeek.toISOString());
+    
+    // Group by day
+    const byDay = {};
+    shifts.forEach(s => {
+      const day = new Date(s.start).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/Los_Angeles' });
+      if (!byDay[day]) byDay[day] = [];
+      byDay[day].push(s);
+    });
+    
+    let text = `📅 *Week Schedule (${startOfWeek.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - ${endOfWeek.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })})*\n\n`;
+    
+    for (const [day, dayShifts] of Object.entries(byDay)) {
+      const clementOnly = dayShifts.filter(s => (s.location || '').includes('Clement'));
+      text += `*${day}* (${clementOnly.length} Clement shifts)\n`;
+      clementOnly.sort((a, b) => a.start.localeCompare(b.start));
+      for (const s of clementOnly) {
+        const startTime = new Date(s.start).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
+        const endTime = new Date(s.end).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
+        text += `  ${s.employee} — ${s.position || 'TBD'} (${startTime}-${endTime})\n`;
+      }
+      text += '\n';
+    }
+    
+    const result = await postToSlack(text);
+    res.json({ success: true, message: 'Posted week schedule to Slack', slackResult: result });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================
 // START
 // ============================================================
 
@@ -749,4 +942,6 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Pixlcat Sling API running on port ${PORT}`);
   console.log(`Token configured: ${SLING_TOKEN ? 'Yes' : 'No — set SLING_TOKEN env var'}`);
+  console.log(`Slack configured: ${SLACK_BOT_TOKEN ? 'Yes' : 'No — set SLACK_BOT_TOKEN env var'}`);
+  startDailyScheduler();
 });
