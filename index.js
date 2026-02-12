@@ -565,11 +565,11 @@ if (alreadyWorking.length>0) {
   const existing = alreadyWorking[0];
   const st=formatTimePT(existing.start); const et=formatTimePT(existing.end);
   if (new Date(existing.start)<new Date(shiftToCover.end) && new Date(existing.end)>new Date(shiftToCover.start)) reasons.push(`Already working ${st}-${et} (overlaps)`);
-  else warnings.push(`Already has a shift ${st}-${et} (no overlap — double possible)`);
+  else warnings.push(`Already has a shift ${st}-${et} (no overlap -- double possible)`);
 }
 // On leave?
 const onLeave = weekLeaves.some(l=>l.employeeId===empId && new Date(l.start)<=targetDate && new Date(l.end)>=targetDate);
-if (onLeave) { const leave=weekLeaves.find(l=>l.employeeId===empId && new Date(l.start)<=targetDate && new Date(l.end)>=targetDate); reasons.push(`On leave`+(leave&&leave.note?` — ${leave.note}`:'')); }
+if (onLeave) { const leave=weekLeaves.find(l=>l.employeeId===empId && new Date(l.start)<=targetDate && new Date(l.end)>=targetDate); reasons.push(`On leave`+(leave&&leave.note?` -- ${leave.note}`:'')); }
 // Availability?
 const dayAvail = weekAvail.filter(a=>a.employeeId===empId && new Date(a.start).toDateString()===shiftDateStr);
 if (dayAvail.length>0) {
@@ -601,7 +601,7 @@ if (shiftsThisWeek+1===6) warnings.push('This would be their 6th shift this week
 else if (shiftsThisWeek+1>6) warnings.push(`Would be shift #${shiftsThisWeek+1} this week`);
 const hist = historicalAvg[empId];
 if (hist) { if (projectedHours-hist.avg>8) warnings.push(`${(projectedHours-hist.avg).toFixed(1)}hrs above usual ${hist.avg.toFixed(1)}hrs/week`); notes.push(`Usually ${hist.avg.toFixed(1)}hrs/wk (${hist.min.toFixed(0)}-${hist.max.toFixed(0)} range)`); }
-notes.push(`${weeklyHours.toFixed(1)}hrs this week → ${projectedHours.toFixed(1)}hrs if covering`);
+notes.push(`${weeklyHours.toFixed(1)}hrs this week -> ${projectedHours.toFixed(1)}hrs if covering`);
 candidates.push({ employee:empName, employeeId:empId, available:reasons.length===0, reasons, warnings, notes, weeklyHours, projectedHours, historicalAvg:hist?hist.avg:null });
 ```
 
@@ -676,7 +676,7 @@ targetShiftId = shifts[0].id;
 }
 if (!targetShiftId) return res.status(400).json({ error: ‘Need either shiftId or date’ });
 const result = await slingPut(`/shifts/${targetShiftId}`, { user: { id: newUser.id } });
-res.json({ success: true, message: `Swapped ${currentEmployee} → ${newEmployee}`, shiftId: targetShiftId, result });
+res.json({ success: true, message: `Swapped ${currentEmployee} -> ${newEmployee}`, shiftId: targetShiftId, result });
 } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -735,7 +735,7 @@ catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ============================================================
-// SCHEDULING ENGINE v2.0 — NEW ENDPOINTS
+// SCHEDULING ENGINE v2.0 – NEW ENDPOINTS
 // ============================================================
 
 // GET /availability/:date
@@ -997,7 +997,7 @@ if (covMatch) {
   return res.json(await covRes.json());
 }
 
-const swapMatch = lower.match(/(?:swap|replace|switch)\s+(\w+)\s+(?:with|for|→|->)\s+(\w+)\s+(?:on\s+)?(\w+)/);
+const swapMatch = lower.match(/(?:swap|replace|switch)\s+(\w+)\s+(?:with|for|->|->)\s+(\w+)\s+(?:on\s+)?(\w+)/);
 if (swapMatch) {
   const [,currentEmp,newEmp,date] = swapMatch;
   const swapRes = await fetch(`http://localhost:${PORT}/shifts/swap`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({currentEmployee:currentEmp,newEmployee:newEmp,date}) });
@@ -1173,23 +1173,23 @@ await postToSlack(formatScheduleForSlack(dateFormatted, shifts));
 const { start, end, dateFormatted } = getDayRange(‘tomorrow’);
 const { shifts } = await getOrgCalendar(start, end);
 await postToSlack(formatScheduleForSlack(dateFormatted, shifts));
-} else if (text.match(/who(?:’s| is) working/)) {
+} else if (text.match(/who(?:‘s| is) working/)) {
 const dateMatch = text.match(/working\s+(\w+)/);
 const date = dateMatch ? dateMatch[1] : ‘today’;
 const { start, end, dateFormatted } = getDayRange(date);
 const { shifts } = await getOrgCalendar(start, end);
 const working = shifts.filter(s => s.employeeId);
 let msg = `*Working ${dateFormatted}:*\n`;
-working.forEach(s => { msg += `• ${s.employee} — ${s.position || 'TBD'} (${formatTimePT(s.start)}-${formatTimePT(s.end)})\n`; });
+working.forEach(s => { msg += `* ${s.employee} -- ${s.position || 'TBD'} (${formatTimePT(s.start)}-${formatTimePT(s.end)})\n`; });
 if (working.length === 0) msg += ‘*No one scheduled.*’;
 await postToSlack(msg);
 } else if (text.includes(‘conflict’)) {
 const confRes = await fetch(`http://localhost:${PORT}/conflicts?days=7`);
 const conflicts = await confRes.json();
-if (conflicts.conflictCount === 0) { await postToSlack(‘✅ No schedule conflicts found for the next 7 days.’); }
+if (conflicts.conflictCount === 0) { await postToSlack(’[OK] No schedule conflicts found for the next 7 days.’); }
 else {
-let msg = `🚨 *${conflicts.conflictCount} Conflict(s) Found*\n`;
-conflicts.conflicts.forEach(c => { msg += `• *${c.type}* — ${c.message}\n`; });
+let msg = `[ALERT] *${conflicts.conflictCount} Conflict(s) Found*\n`;
+conflicts.conflicts.forEach(c => { msg += `* *${c.type}* -- ${c.message}\n`; });
 await postToSlack(msg);
 }
 } else if (text.match(/hours\s+(?:for\s+)?(\w+)/)) {
@@ -1198,7 +1198,7 @@ const uid = resolveEmployeeId(match[1]);
 if (uid) {
 const hoursRes = await fetch(`http://localhost:${PORT}/weekly-hours/${uid}`);
 const data = await hoursRes.json();
-await postToSlack(`📊 *${data.employee} — This Week*\nTotal: ${data.totalHours}hrs | Clement: ${data.clementHours}hrs | 9th St: ${data.ninthStHours}hrs\nRemaining before 40hr cap: ${data.remainingBeforeOT}hrs`);
+await postToSlack(`[STATS] *${data.employee} -- This Week*\nTotal: ${data.totalHours}hrs | Clement: ${data.clementHours}hrs | 9th St: ${data.ninthStHours}hrs\nRemaining before 40hr cap: ${data.remainingBeforeOT}hrs`);
 }
 }
 } catch (err) { console.error(‘Slack event handler error:’, err.message); }
