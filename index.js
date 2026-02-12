@@ -73,16 +73,67 @@ function findPositionByName(positions, name) {
   return positions.find(p => (p.name || '').toLowerCase().includes(lower));
 }
 
-// Helper: get org ID from session (cached)
-let _cachedOrgId = null;
-async function getOrgId() {
-  if (_cachedOrgId) return _cachedOrgId;
+// Helper: get org ID and admin user ID from session (cached)
+let _cachedSession = null;
+async function getSessionInfo() {
+  if (_cachedSession) return _cachedSession;
   const session = await slingGet('/account/session');
   if (session && session.org && session.org.id) {
-    _cachedOrgId = session.org.id;
-    return _cachedOrgId;
+    _cachedSession = {
+      orgId: session.org.id,
+      userId: session.user.id,
+      memberGroupId: session.org.memberGroupId
+    };
+    return _cachedSession;
   }
-  throw new Error('Could not determine org ID from session');
+  throw new Error('Could not determine session info');
+}
+async function getOrgId() {
+  const s = await getSessionInfo();
+  return s.orgId;
+}
+
+// Helper: get org-wide calendar events for a date range
+// Returns shifts enriched with user/position/location names
+async function getOrgCalendar(dateStart, dateEnd) {
+  const { orgId, userId } = await getSessionInfo();
+  const dates = `${dateStart}/${dateEnd}`;
+  const [calData, users, positions, locations] = await Promise.all([
+    slingGet(`/${orgId}/calendar/${userId}?dates=${encodeURIComponent(dates)}`),
+    slingGet('/users'),
+    slingGet('/groups').then(g => g.filter(x => x.type === 'position')),
+    slingGet('/groups').then(g => g.filter(x => x.type === 'location'))
+  ]);
+
+  // Build lookup maps
+  const userMap = {};
+  users.forEach(u => { userMap[u.id] = u; });
+  const posMap = {};
+  positions.forEach(p => { posMap[p.id] = p; });
+  const locMap = {};
+  locations.forEach(l => { locMap[l.id] = l; });
+
+  // Enrich shifts
+  const shifts = (Array.isArray(calData) ? calData : [])
+    .filter(s => s.type === 'shift')
+    .map(s => {
+      const user = s.user ? userMap[s.user.id] : null;
+      const pos = s.position ? posMap[s.position.id] : null;
+      const loc = s.location ? locMap[s.location.id] : null;
+      return {
+        id: s.id,
+        employee: user ? `${user.name || ''} ${user.lname || ''}`.trim() : 'Unassigned',
+        employeeId: s.user ? s.user.id : null,
+        position: pos ? pos.name : null,
+        location: loc ? loc.name : null,
+        start: s.dtstart,
+        end: s.dtend,
+        status: s.status,
+        published: s.status === 'published'
+      };
+    });
+
+  return { shifts, userMap, posMap, locMap };
 }
 
 // Helper: parse a date string to ISO range for a given day
@@ -225,12 +276,8 @@ app.get('/shifts', async (req, res) => {
     const dates = `${start}/${end}`;
     let path = `/calendar/${user_id || ''}/shifts?dates=${encodeURIComponent(dates)}`;
     if (!user_id) {
-      // Get org shifts — need to get org_id first
-      const users = await slingGet('/users');
-      if (users.length > 0 && users[0].org) {
-        const orgId = users[0].org.id || users[0].org;
-        path = `/${orgId}/calendar?dates=${encodeURIComponent(dates)}`;
-      }
+      const { orgId, userId: adminId } = await getSessionInfo();
+      path = `/${orgId}/calendar/${adminId}?dates=${encodeURIComponent(dates)}`;
     }
     const data = await slingGet(path);
     res.json(data);
@@ -243,28 +290,8 @@ app.get('/shifts', async (req, res) => {
 app.get('/shifts/today', async (req, res) => {
   try {
     const { start, end, dateFormatted } = getDayRange('today');
-    const dates = `${start}/${end}`;
-    const users = await slingGet('/users');
-    const orgId = await getOrgId();
-    const data = await slingGet(`/${orgId}/calendar?dates=${encodeURIComponent(dates)}`);
-
-    // Parse into readable format
-    const shifts = Array.isArray(data) ? data : [];
-    const parsed = shifts
-      .filter(s => s.type === 'shift')
-      .map(s => ({
-        id: s.id,
-        employee: s.user ? `${s.user.name || ''} ${s.user.lname || ''}`.trim() : 'Unassigned',
-        employeeId: s.user ? s.user.id : null,
-        position: s.position ? s.position.name : null,
-        location: s.location ? s.location.name : null,
-        start: s.dtstart,
-        end: s.dtend,
-        status: s.status,
-        published: s.published
-      }));
-
-    res.json({ date: dateFormatted, count: parsed.length, shifts: parsed });
+    const { shifts } = await getOrgCalendar(start, end);
+    res.json({ date: dateFormatted, count: shifts.length, shifts });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -275,44 +302,31 @@ app.get('/shifts/week', async (req, res) => {
   try {
     const now = new Date();
     const startOfWeek = new Date(now);
-    startOfWeek.setDate(now.getDate() - now.getDay()); // Sunday
+    startOfWeek.setDate(now.getDate() - now.getDay());
     startOfWeek.setHours(0, 0, 0, 0);
     const endOfWeek = new Date(startOfWeek);
     endOfWeek.setDate(startOfWeek.getDate() + 6);
     endOfWeek.setHours(23, 59, 59, 999);
 
-    const dates = `${startOfWeek.toISOString()}/${endOfWeek.toISOString()}`;
-    const users = await slingGet('/users');
-    const orgId = await getOrgId();
-    const data = await slingGet(`/${orgId}/calendar?dates=${encodeURIComponent(dates)}`);
+    const { shifts } = await getOrgCalendar(startOfWeek.toISOString(), endOfWeek.toISOString());
+    
+    // Add day name
+    const enriched = shifts.map(s => ({
+      ...s,
+      day: new Date(s.start).toLocaleDateString('en-US', { weekday: 'long' })
+    }));
 
-    const shifts = (Array.isArray(data) ? data : [])
-      .filter(s => s.type === 'shift')
-      .map(s => ({
-        id: s.id,
-        employee: s.user ? `${s.user.name || ''} ${s.user.lname || ''}`.trim() : 'Unassigned',
-        employeeId: s.user ? s.user.id : null,
-        position: s.position ? s.position.name : null,
-        location: s.location ? s.location.name : null,
-        start: s.dtstart,
-        end: s.dtend,
-        day: new Date(s.dtstart).toLocaleDateString('en-US', { weekday: 'long' }),
-        status: s.status,
-        published: s.published
-      }));
-
-    // Group by day
     const byDay = {};
-    shifts.forEach(s => {
+    enriched.forEach(s => {
       if (!byDay[s.day]) byDay[s.day] = [];
       byDay[s.day].push(s);
     });
 
     res.json({
       weekOf: startOfWeek.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-      totalShifts: shifts.length,
+      totalShifts: enriched.length,
       byDay,
-      allShifts: shifts
+      allShifts: enriched
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -323,25 +337,7 @@ app.get('/shifts/week', async (req, res) => {
 app.get('/schedule/:date', async (req, res) => {
   try {
     const { start, end, dateFormatted } = getDayRange(req.params.date);
-    const dates = `${start}/${end}`;
-    const users = await slingGet('/users');
-    const orgId = await getOrgId();
-    const data = await slingGet(`/${orgId}/calendar?dates=${encodeURIComponent(dates)}`);
-
-    const shifts = (Array.isArray(data) ? data : [])
-      .filter(s => s.type === 'shift')
-      .map(s => ({
-        id: s.id,
-        employee: s.user ? `${s.user.name || ''} ${s.user.lname || ''}`.trim() : 'Unassigned',
-        employeeId: s.user ? s.user.id : null,
-        position: s.position ? s.position.name : null,
-        location: s.location ? s.location.name : null,
-        start: s.dtstart,
-        end: s.dtend,
-        status: s.status,
-        published: s.published
-      }));
-
+    const { shifts } = await getOrgCalendar(start, end);
     res.json({ date: dateFormatted, count: shifts.length, shifts });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -362,20 +358,13 @@ app.get('/whos-working', async (req, res) => {
 app.get('/whos-working/:date', async (req, res) => {
   try {
     const { start, end, dateFormatted } = getDayRange(req.params.date);
-    const dates = `${start}/${end}`;
-    const users = await slingGet('/users');
-    const orgId = await getOrgId();
-    const data = await slingGet(`/${orgId}/calendar?dates=${encodeURIComponent(dates)}`);
-
-    const working = (Array.isArray(data) ? data : [])
-      .filter(s => s.type === 'shift' && s.user)
-      .map(s => ({
-        employee: `${s.user.name || ''} ${s.user.lname || ''}`.trim(),
-        position: s.position ? s.position.name : null,
-        start: s.dtstart,
-        end: s.dtend
-      }));
-
+    const { shifts } = await getOrgCalendar(start, end);
+    const working = shifts.filter(s => s.employeeId).map(s => ({
+      employee: s.employee,
+      position: s.position,
+      start: s.start,
+      end: s.end
+    }));
     res.json({ date: dateFormatted, working });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -506,9 +495,8 @@ app.post('/shifts/swap', async (req, res) => {
 
       const orgId = await getOrgId();
 
-      const calData = await slingGet(`/${orgId}/calendar?dates=${encodeURIComponent(dates)}`);
-      const shifts = (Array.isArray(calData) ? calData : [])
-        .filter(s => s.type === 'shift' && s.user && s.user.id === currentUser.id);
+      const { shifts: allShifts } = await getOrgCalendar(start, end);
+      const shifts = allShifts.filter(s => s.employeeId === currentUser.id);
 
       if (shifts.length === 0) {
         return res.status(404).json({
@@ -567,11 +555,10 @@ app.post('/shifts/assign', async (req, res) => {
 
     const { start, end, dateFormatted } = getDayRange(date);
     const dates = `${start}/${end}`;
-    const calData = await slingGet(`/${orgId}/calendar?dates=${encodeURIComponent(dates)}`);
+    const { shifts: allShifts } = await getOrgCalendar(start, end);
 
     // Look for unassigned shifts matching position
-    const unassigned = (Array.isArray(calData) ? calData : [])
-      .filter(s => s.type === 'shift' && !s.user);
+    const unassigned = allShifts.filter(s => !s.employeeId);
 
     let positionMatch = null;
     if (position) {
@@ -679,10 +666,10 @@ app.post('/command', async (req, res) => {
       const dates = `${start}/${end}`;
       const users = await slingGet('/users');
       const orgId = await getOrgId();
-      const calData = await slingGet(`/${orgId}/calendar?dates=${encodeURIComponent(dates)}`);
-      const working = (Array.isArray(calData) ? calData : [])
-        .filter(s => s.type === 'shift' && s.user)
-        .map(s => `${s.user.name || ''} ${s.user.lname || ''}`.trim() + (s.position ? ` (${s.position.name})` : '') + ` ${new Date(s.dtstart).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}-${new Date(s.dtend).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}`);
+      const { shifts: allShifts } = await getOrgCalendar(start, end);
+      const working = allShifts
+        .filter(s => s.employeeId)
+        .map(s => `${s.employee}` + (s.position ? ` (${s.position})` : '') + ` ${new Date(s.start).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}-${new Date(s.end).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}`);
       return res.json({ date: dateFormatted, working });
     }
 
