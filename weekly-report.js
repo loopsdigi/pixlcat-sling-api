@@ -56,6 +56,7 @@ async function fetchWeekSF(startDate, endDate) {
     laborHours: 0, employees: new Set(),
     mochiTransactions: 0, totalTransactions: 0,
     flavors: {}, employeeHours: {}, dailySales: [],
+    categories: {},
     dayparts: { 'Warmup (7-8am)': 0, 'Rush (8-11am)': 0, 'Core (11am-2pm)': 0, 'Drift (2-4pm)': 0 },
   };
 
@@ -107,6 +108,15 @@ async function fetchWeekSF(startDate, endDate) {
               if (totals.dayparts[name] !== undefined) {
                 totals.dayparts[name] += d.sales || 0;
               }
+            }
+          }
+
+          // Categories (from Toast menu group mapping)
+          if (m.categories) {
+            for (const [name, d] of Object.entries(m.categories)) {
+              if (!totals.categories[name]) totals.categories[name] = { count: 0, revenue: 0 };
+              totals.categories[name].count += d.count || 0;
+              totals.categories[name].revenue += d.revenue || 0;
             }
           }
         }
@@ -367,6 +377,19 @@ function formatWeeklyReport(currWeek, prevWeek, sfCurr, sfPrev, bosCurr, bosPrev
     for (const e of sfEmpList) {
       const prevHours = sfPrev.employeeHours[e.name] || 0;
       msg += `  • ${e.name}: ${e.hours.toFixed(1)}h ${prevHours > 0 ? `(prev: ${prevHours.toFixed(1)}h)` : ''}\n`;
+    }
+    msg += '\n';
+  }
+
+  // SF categories
+  const sfCats = Object.entries(sfCurr.categories || {})
+    .map(([name, d]) => ({ name, count: d.count, revenue: d.revenue }))
+    .sort((a, b) => b.revenue - a.revenue);
+  if (sfCats.length > 0) {
+    msg += `*Category Mix:*\n`;
+    for (const c of sfCats) {
+      const catPct = sfCurr.sales > 0 ? (c.revenue / sfCurr.sales * 100).toFixed(0) : 0;
+      msg += `  • ${c.name}: ${fmt(c.revenue)} (${catPct}%) — ${c.count} items\n`;
     }
     msg += '\n';
   }
