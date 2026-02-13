@@ -455,6 +455,19 @@ function formatWeeklyReport(currWeek, prevWeek, sfCurr, sfPrev, bosCurr, bosPrev
       msg += `*Top Mochi:* ${ferryFlavors.map(f => `${f.name} (${f.count})`).join(', ')}\n\n`;
     }
 
+    // Ferry categories
+    const ferryCats = Object.entries(ferryCurr.categories)
+      .map(([name, d]) => ({ name, count: d.count, revenue: d.revenue }))
+      .sort((a, b) => b.revenue - a.revenue);
+    if (ferryCats.length > 0) {
+      msg += `*Category Mix:*\n`;
+      for (const c of ferryCats) {
+        const catPct = ferryCurr.sales > 0 ? (c.revenue / ferryCurr.sales * 100).toFixed(0) : 0;
+        msg += `  • ${c.name}: ${fmt(c.revenue)} (${catPct}%) — ${c.count} items\n`;
+      }
+      msg += '\n';
+    }
+
     const ferryEmpList = Object.entries(ferryCurr.employeeHours)
       .map(([name, d]) => ({ name, hours: d.hours, cost: d.cost, rate: d.rate }))
       .sort((a, b) => b.hours - a.hours);
