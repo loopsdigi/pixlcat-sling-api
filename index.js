@@ -2465,7 +2465,8 @@ app.get('/slack/week', async (req, res) => {
 
 // ============================================================
 // WEEKLY REPORT — WoW comparison posted to ops channel
-// ============================================================app.get('/cron/weekly-report', async (req, res) => {
+// ============================================================
+app.get('/cron/weekly-report', async (req, res) => {
   const cronSecret = process.env.CRON_SECRET;
   if (cronSecret && req.query.key !== cronSecret) return res.status(403).json({ error: 'Invalid cron key' });
 
