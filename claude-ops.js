@@ -15,10 +15,11 @@
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const TOAST_URL = process.env.TOAST_API_URL || 'https://toast-api-1.onrender.com';
 const SQUARE_URL = process.env.SQUARE_API_URL || 'https://square-api-mi4f.onrender.com';
+const FERRY_URL = process.env.FERRY_API_URL || 'https://pixlcat-square-ferry.onrender.com';
 const SLING_URL = process.env.SLING_API_URL || 'https://pixlcat-sling-api.onrender.com';
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
 
-// SF benchmarks
+// SF Clement benchmarks
 const SF_BENCH = {
   weekday: { sales: 1807, splh: 96 },
   weekend: { sales: 3610, splh: 111 },
@@ -28,6 +29,12 @@ const SF_BENCH = {
 const BOS_BENCH = {
   weekday: { sales: 500, splh: 25 },
   weekend: { sales: 800, splh: 40 },
+};
+
+// Ferry Building benchmarks (new location — TBD, using placeholder)
+const FERRY_BENCH = {
+  weekday: { sales: 0, splh: 0 },
+  weekend: { sales: 0, splh: 0 },
 };
 
 // ── Date range detection ─────────────────────────────────────────────────────
@@ -121,13 +128,25 @@ function determineDateRange(text) {
 
 function detectLocation(text) {
   const t = text.toLowerCase();
-  if (/\b(boston|charlestown|bos|square)\b/.test(t) && /\b(sf|san\s*francisco|clement|richmond|toast)\b/.test(t)) {
-    return 'both';
-  }
-  if (/\b(boston|charlestown|bos)\b/.test(t)) return 'boston';
-  if (/\b(sf|san\s*francisco|clement|richmond)\b/.test(t)) return 'sf';
-  // Default: both locations
-  return 'both';
+  // Specific location detection
+  const hasFerry = /\b(ferry|ferry\s*building|fb)\b/.test(t);
+  const hasBoston = /\b(boston|charlestown|bos)\b/.test(t);
+  const hasSF = /\b(clement|richmond|toast)\b/.test(t);
+  const hasAll = /\b(all|every|each|company|combined|total)\b/.test(t);
+
+  // If they say "all locations" or multiple specific ones
+  if (hasAll) return 'all';
+  
+  // Specific single locations
+  if (hasFerry && !hasBoston && !hasSF) return 'ferry';
+  if (hasBoston && !hasFerry && !hasSF) return 'boston';
+  if (hasSF && !hasBoston && !hasFerry) return 'sf';
+
+  // "SF" alone could mean Clement or Ferry — default to all SF if ambiguous
+  if (/\b(sf|san\s*francisco)\b/.test(t) && !hasFerry && !hasSF) return 'all';
+
+  // Default: all locations
+  return 'all';
 }
 
 
@@ -155,6 +174,19 @@ async function fetchSquareData(date) {
     return data;
   } catch (e) {
     console.error(`Square fetch error for ${date}:`, e.message);
+    return null;
+  }
+}
+
+async function fetchFerryData(date) {
+  try {
+    const res = await fetch(`${FERRY_URL}/sales/${date}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data.status !== 'success') return null;
+    return data;
+  } catch (e) {
+    console.error(`Ferry fetch error for ${date}:`, e.message);
     return null;
   }
 }
@@ -304,6 +336,54 @@ function formatBostonContext(date, data) {
   return ctx;
 }
 
+function formatFerryContext(date, data) {
+  if (!data) return `\nFerry Building (${date}): No data available.\n`;
+
+  const m = data.metrics;
+  const day = data.day_of_week || new Date(date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long' });
+
+  let ctx = `\n=== SF / FERRY BUILDING — ${day}, ${date} ===\n`;
+  ctx += `Net Sales: $${(m.net_sales || 0).toFixed(2)}\n`;
+  ctx += `Total Orders: ${m.total_orders || 0} | Avg Check: $${(m.avg_check || 0).toFixed(2)}\n`;
+  ctx += `Gross Sales: $${(m.gross_sales || 0).toFixed(2)} | Discounts: $${(m.total_discount || 0).toFixed(2)}\n`;
+  ctx += `Tips: $${(m.total_tip || 0).toFixed(2)} | Tax: $${(m.total_tax || 0).toFixed(2)}\n`;
+
+  if (data.splh) {
+    ctx += `SPLH: $${(data.splh.splh || 0).toFixed(2)} | Labor Cost: $${(data.splh.total_labor_cost || 0).toFixed(2)} | Labor %: ${(data.splh.labor_percentage || 0).toFixed(1)}%\n`;
+  }
+
+  if (m.mochi) {
+    ctx += `Mochi Attachment Rate: ${(m.mochi.attachment_rate || 0).toFixed(1)}% (target: 25%)\n`;
+    ctx += `Mochi Revenue: $${(m.mochi.mochi_revenue || 0).toFixed(2)} | Count: ${m.mochi.total_mochi_items || 0}\n`;
+    if (m.mochi.flavors) {
+      ctx += `Mochi Flavors:\n`;
+      for (const [name, d] of Object.entries(m.mochi.flavors)) {
+        ctx += `  ${name}: ${d.count || 0} sold, $${(d.revenue || 0).toFixed(2)}\n`;
+      }
+    }
+  }
+
+  if (data.labor) {
+    ctx += `Labor: ${(data.labor.total_hours || 0).toFixed(1)}h total, ${data.labor.total_shifts || 0} shifts\n`;
+    ctx += `Labor Cost: $${(data.labor.total_labor_cost || 0).toFixed(2)}\n`;
+    if (data.labor.team) {
+      ctx += `Team:\n`;
+      for (const [name, d] of Object.entries(data.labor.team)) {
+        ctx += `  ${name}: ${(d.hours || 0).toFixed(1)}h @ $${(d.hourly_rate || 0).toFixed(2)}/hr = $${(d.cost || 0).toFixed(2)}\n`;
+      }
+    }
+  }
+
+  if (m.categories) {
+    ctx += `Categories:\n`;
+    for (const [name, d] of Object.entries(m.categories)) {
+      ctx += `  ${name}: ${d.count || 0} items, $${(d.revenue || 0).toFixed(2)}\n`;
+    }
+  }
+
+  return ctx;
+}
+
 function formatScheduleContext(location, date, data) {
   if (!data) return '';
   const shifts = data.shifts || [];
@@ -331,18 +411,23 @@ async function fetchAllData(startDate, endDate, location) {
   while (current <= end) {
     const dateStr = current.toLocaleDateString('en-CA');
 
-    if (location === 'sf' || location === 'both') {
+    if (location === 'sf' || location === 'all') {
       const toastData = await fetchToastData(dateStr);
       context += formatSFContext(dateStr, toastData);
       const sfSched = await fetchSFSchedule(dateStr);
-      context += formatScheduleContext('SF', dateStr, sfSched);
+      context += formatScheduleContext('SF Clement', dateStr, sfSched);
     }
 
-    if (location === 'boston' || location === 'both') {
+    if (location === 'boston' || location === 'all') {
       const squareData = await fetchSquareData(dateStr);
       context += formatBostonContext(dateStr, squareData);
       const bosSched = await fetchBostonSchedule(dateStr);
       context += formatScheduleContext('Boston', dateStr, bosSched);
+    }
+
+    if (location === 'ferry' || location === 'all') {
+      const ferryData = await fetchFerryData(dateStr);
+      context += formatFerryContext(dateStr, ferryData);
     }
 
     current.setDate(current.getDate() + 1);
@@ -368,7 +453,8 @@ async function askClaude(userMessage, dataContext) {
   const systemPrompt = `You are the Pixlcat business intelligence assistant in Slack. You answer questions about sales, mochi, labor, scheduling, and operations across both Pixlcat locations.
 
 LOCATIONS:
-- SF / San Francisco: 519 Clement St, Inner Richmond. POS: Toast. Scheduling: Sling. Timezone: Pacific.
+- SF / San Francisco / Clement: 519 Clement St, Inner Richmond. POS: Toast. Scheduling: Sling. Timezone: Pacific.
+- SF / Ferry Building: San Francisco Ferry Building. POS: Square. No scheduling yet. Timezone: Pacific. New location. Open Saturdays only, 8am-2pm.
 - Boston / Charlestown: New location. POS: Square. Scheduling: Square. Timezone: Eastern.
 
 Current date/time: ${todayStr}, ${timeStr} PT
