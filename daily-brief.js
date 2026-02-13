@@ -18,6 +18,35 @@ const BOS_BENCH = {
   weekend: { sales: 800, splh: 40 }
 };
 
+// SF Employee Hourly Rates
+const SF_HOURLY_RATES = {
+  'Anya': 22.00,
+  'Brianna': 21.00,
+  'Clayton': 21.00,
+  'Clayton Durning': 21.00,
+  'Emily': 19.18,
+  'Emily Mutchie': 19.18,
+  'Hayden': 21.00,
+  'Hayden Gardiner': 21.00,
+  'Hera': 19.18,
+  'James': 21.00,
+  'Jessica': 22.00,
+  'Jessica Broussard': 22.00,
+  'Jesus': 24.00,
+  'Maya': 19.18,
+  'Maya M': 19.18,
+  'Maya Mendoza': 19.18,
+  'Maya L': 19.18,
+  'Mirä': 22.00,
+  'Mira': 22.00,
+  'Otilia': 19.18,
+  'Otilia Saetern': 19.18,
+  'Saige': 21.00,
+  'Sara': 19.18,
+  'Milla': 19.18,
+  'Milla L': 19.18
+};
+
 const fmt = n => '$' + n.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 const ico = (v, target) => v >= target ? '🟢' : '🔴';
 
@@ -127,10 +156,31 @@ async function fetchSF() {
   if (shifts.length > 0) {
     msg += `\n*Labor Report:*\n`;
     shifts.sort((a, b) => (b.hours || 0) - (a.hours || 0));
+    
+    let totalCost = 0;
+    
     for (const s of shifts) {
-      msg += `  • ${s.employee}: ${(s.hours || 0).toFixed(1)}h\n`;
+      const name = s.employee || 'Unknown';
+      const hours = s.hours || 0;
+      
+      // Match rate - try exact match first, then first name
+      let rate = SF_HOURLY_RATES[name];
+      if (!rate) {
+        const firstName = name.split(' ')[0];
+        rate = SF_HOURLY_RATES[firstName];
+      }
+      if (!rate) {
+        rate = 20.00; // Fallback default
+      }
+      
+      const cost = hours * rate;
+      totalCost += cost;
+      
+      msg += `  • ${name}: ${hours.toFixed(1)}h @ ${fmt(rate)}/hr → ${fmt(cost)}\n`;
     }
-    msg += `  *Total: ${totalHours.toFixed(1)}h across ${shifts.length} shifts*\n`;
+    
+    const avgRate = totalHours > 0 ? totalCost / totalHours : 0;
+    msg += `  *Total: ${totalHours.toFixed(1)}h | ${fmt(totalCost)} labor cost | Avg ${fmt(avgRate)}/hr*\n`;
   }
 
   // Mochi product mix
