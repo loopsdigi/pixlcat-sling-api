@@ -2476,15 +2476,7 @@ app.get('/slack/week', async (req, res) => {
     }
     console.log('[weekly] Report posted to ops channel');
     res.json(result);
-  } catch (err) {
-    console.error('[weekly] Error:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ============================================================
-// LABOR ALERTS — Clock-out & overtime checks
-// ============================================================
+  } 
 
 // SF Labor Alert — call at 7pm PST via cron
 app.get('/cron/labor-alert-sf', async (req, res) => {
