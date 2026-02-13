@@ -21,7 +21,9 @@ const express = require('express');
 const crypto = require('crypto');
 const cors = require('cors');
 const { handleWithClaude } = require('./claude-nlp');
-const { handleOpsQuery, generateWeeklyReport } = require('./claude-ops');
+const { handleOpsQuery } = require('./claude-ops');
+const { generateWeeklyReport } = require('./weekly-report');
+
 
 // Node 18+ has global fetch. For older Node, install node-fetch and uncomment:
 // const fetch = global.fetch || require('node-fetch');
