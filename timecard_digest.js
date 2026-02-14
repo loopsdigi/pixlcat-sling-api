@@ -9,7 +9,7 @@ const SLING_ORG_ID = process.env.SLING_ORG_ID || '593037'; // Default org ID fro
 
 // Email configuration
 const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
-const EMAIL_FROM = 'noreply@pixlcatcoffee.com';
+const EMAIL_FROM = 'david@pixlcatcoffee.com';
 const EMAIL_TO = ['jeff@pixlcatcoffee.com', 'david@pixlcatcoffee.com'];
 
 // ============================================
