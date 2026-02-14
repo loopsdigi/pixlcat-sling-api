@@ -2879,6 +2879,30 @@ app.get('/health', (req, res) => {
 // MESSAGING: Send DM to Sling
 // ============================================================
 
+// Debug endpoint to inspect conversations
+app.get('/messages/conversations/debug', async (req, res) => {
+  try {
+    const convResp = await fetch(`${SLING_BASE}/v1/593037/conversations`, {
+      headers: { Authorization: SLING_TOKEN }
+    });
+    const conversations = await convResp.json();
+    
+    // Return just the first 5 for inspection
+    res.json({
+      total: conversations.length,
+      sample: conversations.slice(0, 5).map(c => ({
+        id: c.id,
+        name: c.name,
+        type: c.type,
+        users: c.users,
+        userCount: c.users?.length
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.post('/messages/dm', async (req, res) => {
   try {
     const { userId, userName, text } = req.body;
