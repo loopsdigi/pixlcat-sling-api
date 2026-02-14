@@ -2913,15 +2913,17 @@ app.post('/messages/dm', async (req, res) => {
     });
     const conversations = await convResp.json();
     
-    // Find DM conversation with this user (look for 1-on-1 conversations)
+    // Find DM conversation with this user
+    // Look for conversations that include the target user
     const dmConv = conversations.find(c => 
-      c.type === 'direct' && c.users?.some(u => u.id === targetUser.id)
+      c.users && c.users.some(u => u.id === targetUser.id)
     );
     
     if (!dmConv) {
       return res.status(404).json({ 
         error: `No DM conversation found with ${targetUser.firstName || userName}. Please send them a message in Sling first to create the conversation.`,
-        userId: targetUser.id
+        userId: targetUser.id,
+        debug: `Checked ${conversations.length} conversations`
       });
     }
     
