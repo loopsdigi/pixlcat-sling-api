@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Pixlcat Sling API v2.0.0
+ * Pixlcat Sling API v2.2.0
  * Copy-paste into: index.js
  *
  * Required env:
@@ -10,6 +10,7 @@
  * - SLACK_SIGNING_SECRET (for /slack/events verification)
  * - SLACK_BOT_TOKEN (optional if using bot token)
  * - SLACK_WEBHOOK_URL (optional if using webhook)
+ * - SENDGRID_API_KEY (for timecard digest emails)
  * - ALLOWED_ORIGINS (optional, comma-separated)
  * - PORT (optional)
  * - CRON_SECRET (optional)
@@ -23,6 +24,7 @@ const cors = require('cors');
 const { handleWithClaude } = require('./claude-nlp');
 const { handleOpsQuery } = require('./claude-ops');
 const { generateWeeklyReport } = require('./weekly-report');
+const { generateDigest, findTimecardConversation, getLastWeekMessages } = require('./timecard_digest');
 
 
 // Node 18+ has global fetch. For older Node, install node-fetch and uncomment:
@@ -37,6 +39,105 @@ const SLING_BASE = 'https://api.getsling.com';
 const SLING_TOKEN = process.env.SLING_TOKEN;
 const API_KEY = process.env.API_KEY;
 const SLACK_SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET;
+
+// ============================================================
+// MONITORING STATE MANAGEMENT
+// ============================================================
+const monitoringState = {
+  activeShifts: new Map(),
+  pendingReplies: new Map(),
+  resolvedToday: new Set(),
+  apiCallCount: {
+    sling: 0,
+    toast: 0,
+    lastReset: new Date().toDateString()
+  }
+};
+
+// Helper: Parse name from message
+function parseNameFromMessage(text) {
+  const patterns = [
+    /(\w+)\s+is covering/i,
+    /(\w+)\s+covered/i,
+    /(\w+)\s+will cover/i,
+    /(\w+)\s+can cover/i,
+    /got it covered,?\s+(\w+)/i,
+  ];
+  
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match) return match[1];
+  }
+  return null;
+}
+
+// Helper: Find user by name
+async function findUserByName(firstName) {
+  const response = await fetch('https://pixlcat-sling-api.onrender.com/users');
+  const data = await response.json();
+  const users = data.users || [];
+  
+  return users.find(u => 
+    u.firstName?.toLowerCase() === firstName.toLowerCase() ||
+    u.fullName?.toLowerCase().includes(firstName.toLowerCase())
+  );
+}
+
+// Helper: Check clock status via Toast API
+async function checkClockStatus(userId, time, type = 'in') {
+  try {
+    const date = new Date(time).toISOString().split('T')[0];
+    
+    // Fetch timecards from Toast
+    const response = await fetch(`https://toast-api-1.onrender.com/labor/timecards?date=${date}`);
+    
+    if (!response.ok) {
+      console.error(`Toast API error: ${response.status}`);
+      return false;
+    }
+    
+    const timecards = await response.json();
+    
+    // Check if user has clock-in/out within 30 min tolerance
+    const scheduledTime = new Date(time).getTime();
+    const tolerance = 30 * 60 * 1000; // 30 minutes
+    
+    for (const card of timecards) {
+      // Match by employee ID (adjust field names based on actual Toast response)
+      if (card.employeeId !== userId && card.userId !== userId) continue;
+      
+      const clockTime = new Date(
+        type === 'in' ? card.inDate || card.clockIn : card.outDate || card.clockOut
+      ).getTime();
+      
+      if (Math.abs(clockTime - scheduledTime) < tolerance) {
+        return true;
+      }
+    }
+    
+    return false;
+  } catch (error) {
+    console.error('Error checking clock status:', error);
+    return false;
+  }
+}
+
+// Helper: Send DM wrapper
+async function sendDMHelper(userId, text) {
+  const response = await fetch('https://pixlcat-sling-api.onrender.com/messages/dm', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userId, text })
+  });
+  return response.json();
+}
+
+// Helper: Get today's schedule
+async function getTodaySchedule() {
+  const today = new Date().toISOString().split('T')[0];
+  const response = await fetch(`https://pixlcat-sling-api.onrender.com/schedule/${today}`);
+  return response.json();
+}
 
 // Event deduplication tracking
 const processedEvents = new Set();
@@ -2868,11 +2969,265 @@ app.post('/slack/events', async (req, res) => {
 });
 
 // ============================================================
+// MONITORING CRON ENDPOINTS
+// ============================================================
+
+// Cron: Smart Clock-In Check (Every Hour)
+app.get('/cron/smart-clockin-check', async (req, res) => {
+  try {
+    const now = new Date();
+    const nowTime = now.getTime();
+    const oneHourLater = nowTime + (60 * 60 * 1000);
+    
+    console.log(`🔍 Smart clock-in check at ${now.toLocaleTimeString()}`);
+    
+    const schedule = await getTodaySchedule();
+    const checksPerformed = [];
+    
+    for (const shift of schedule) {
+      const shiftStart = new Date(shift.startTime).getTime();
+      const graceWindow = shiftStart + (10 * 60 * 1000); // +10 min grace
+      
+      const shouldCheck = 
+        shiftStart <= oneHourLater && 
+        nowTime >= graceWindow &&
+        !monitoringState.resolvedToday.has(shift.id);
+      
+      if (!shouldCheck) continue;
+      
+      const existing = monitoringState.activeShifts.get(shift.id);
+      if (existing?.status === 'monitoring_clockin') continue;
+      
+      const clockedIn = await checkClockStatus(shift.userId, shift.startTime, 'in');
+      
+      if (clockedIn) {
+        console.log(`✅ ${shift.userName} clocked in`);
+        monitoringState.activeShifts.set(shift.id, {
+          employeeId: shift.userId,
+          status: 'clockin_resolved',
+          resolvedAt: new Date().toISOString()
+        });
+        checksPerformed.push({ employee: shift.userName, status: 'clocked_in' });
+      } else {
+        console.log(`❌ ${shift.userName} missing clock-in`);
+        
+        const startTime = new Date(shift.startTime).toLocaleTimeString('en-US', { 
+          hour: 'numeric', 
+          minute: '2-digit' 
+        });
+        
+        const dmResult = await sendDMHelper(
+          shift.userId,
+          `Hey ${shift.firstName}! You're scheduled at ${startTime} but haven't clocked in yet. Everything ok?`
+        );
+        
+        monitoringState.activeShifts.set(shift.id, {
+          employeeId: shift.userId,
+          status: 'monitoring_clockin',
+          reminderSent: new Date().toISOString(),
+          conversationId: dmResult.conversationId
+        });
+        
+        if (dmResult.conversationId) {
+          monitoringState.pendingReplies.set(dmResult.conversationId, {
+            shiftId: shift.id,
+            sentAt: new Date().toISOString(),
+            resolved: false
+          });
+        }
+        
+        checksPerformed.push({ employee: shift.userName, status: 'reminder_sent' });
+      }
+    }
+    
+    res.json({
+      timestamp: now.toISOString(),
+      shiftsChecked: checksPerformed.length,
+      checks: checksPerformed
+    });
+  } catch (error) {
+    console.error('Error in smart clock-in check:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Cron: Smart Reply Check (Every Hour)
+app.get('/cron/smart-reply-check', async (req, res) => {
+  try {
+    console.log(`💬 Smart reply check - ${monitoringState.pendingReplies.size} pending`);
+    
+    const processedReplies = [];
+    
+    for (const [conversationId, pending] of monitoringState.pendingReplies.entries()) {
+      if (pending.resolved) continue;
+      
+      // Fetch messages from conversation
+      const messagesResp = await fetch(
+        `${SLING_BASE}/v1/593037/conversations/${conversationId}/messages`,
+        { headers: { Authorization: SLING_TOKEN } }
+      );
+      
+      const messages = await messagesResp.json();
+      const sentTime = new Date(pending.sentAt);
+      const newMessages = messages.filter(m => new Date(m.timestamp) > sentTime);
+      
+      if (newMessages.length === 0) continue;
+      
+      const latestReply = newMessages[newMessages.length - 1];
+      const coveringName = parseNameFromMessage(latestReply.content);
+      
+      if (coveringName) {
+        const coveringEmployee = await findUserByName(coveringName);
+        const shift = monitoringState.activeShifts.get(pending.shiftId);
+        
+        if (!coveringEmployee) {
+          await sendDMHelper(
+            shift.employeeId,
+            `I couldn't find "${coveringName}" in the system. Can you double-check the name?`
+          );
+          continue;
+        }
+        
+        const schedule = await getTodaySchedule();
+        const shiftDetails = schedule.find(s => s.id === pending.shiftId);
+        const clockedIn = await checkClockStatus(coveringEmployee.id, shiftDetails.startTime, 'in');
+        
+        if (clockedIn) {
+          await sendDMHelper(
+            shift.employeeId,
+            `Perfect! ${coveringEmployee.firstName} already clocked in. You're all set 👍`
+          );
+          
+          monitoringState.activeShifts.set(pending.shiftId, {
+            ...shift,
+            status: 'monitoring_coverage_clockout',
+            coveredBy: coveringEmployee.id,
+            coveringName: coveringEmployee.firstName,
+            originalEnd: shiftDetails.endTime
+          });
+        } else {
+          await sendDMHelper(
+            coveringEmployee.id,
+            `Hey ${coveringEmployee.firstName}! Someone said you're covering their shift. Can you clock in now?`
+          );
+          
+          await sendDMHelper(
+            shift.employeeId,
+            `Got it! I messaged ${coveringEmployee.firstName} to clock in.`
+          );
+        }
+        
+        pending.resolved = true;
+        processedReplies.push({ conversationId, coveringEmployee: coveringEmployee.firstName });
+      }
+    }
+    
+    res.json({
+      repliesProcessed: processedReplies.length,
+      stillPending: Array.from(monitoringState.pendingReplies.values()).filter(p => !p.resolved).length,
+      details: processedReplies
+    });
+  } catch (error) {
+    console.error('Error in smart reply check:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Cron: Smart Clock-Out Check (Every 15 min)
+app.get('/cron/smart-clockout-check', async (req, res) => {
+  try {
+    const now = new Date();
+    const nowTime = now.getTime();
+    
+    console.log(`⏰ Smart clock-out check at ${now.toLocaleTimeString()}`);
+    
+    const schedule = await getTodaySchedule();
+    const checksPerformed = [];
+    
+    for (const shift of schedule) {
+      const shiftEnd = new Date(shift.endTime).getTime();
+      const checkWindow = 15 * 60 * 1000; // 15 minutes
+      const withinWindow = Math.abs(nowTime - shiftEnd) <= checkWindow;
+      
+      if (!withinWindow || monitoringState.resolvedToday.has(shift.id)) continue;
+      
+      const shiftStatus = monitoringState.activeShifts.get(shift.id);
+      let employeeToCheck = shift.userId;
+      let employeeName = shift.userName;
+      
+      if (shiftStatus?.coveredBy) {
+        employeeToCheck = shiftStatus.coveredBy;
+        employeeName = shiftStatus.coveringName;
+      }
+      
+      const clockedOut = await checkClockStatus(employeeToCheck, shift.endTime, 'out');
+      
+      if (clockedOut) {
+        console.log(`✅ ${employeeName} clocked out`);
+        monitoringState.resolvedToday.add(shift.id);
+        monitoringState.activeShifts.delete(shift.id);
+        checksPerformed.push({ employee: employeeName, status: 'clocked_out' });
+      } else if (!shiftStatus?.clockoutReminderSent) {
+        const endTime = new Date(shift.endTime).toLocaleTimeString('en-US', { 
+          hour: 'numeric', 
+          minute: '2-digit' 
+        });
+        
+        await sendDMHelper(
+          employeeToCheck,
+          `Hey! Your shift ended at ${endTime}. Don't forget to clock out!`
+        );
+        
+        monitoringState.activeShifts.set(shift.id, {
+          ...shiftStatus,
+          clockoutReminderSent: new Date().toISOString()
+        });
+        
+        checksPerformed.push({ employee: employeeName, status: 'reminder_sent' });
+      }
+    }
+    
+    res.json({
+      timestamp: now.toISOString(),
+      shiftsChecked: checksPerformed.length,
+      checks: checksPerformed
+    });
+  } catch (error) {
+    console.error('Error in smart clock-out check:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Cron: Reset Daily State (Midnight)
+app.get('/cron/reset-daily-state', async (req, res) => {
+  console.log('🔄 Resetting daily monitoring state...');
+  
+  monitoringState.activeShifts.clear();
+  monitoringState.pendingReplies.clear();
+  monitoringState.resolvedToday.clear();
+  
+  res.json({ 
+    status: 'reset',
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Debug: Monitoring Status
+app.get('/monitoring/status', (req, res) => {
+  res.json({
+    activeShifts: Array.from(monitoringState.activeShifts.entries()),
+    pendingReplies: Array.from(monitoringState.pendingReplies.entries()),
+    resolvedToday: Array.from(monitoringState.resolvedToday),
+    apiCalls: monitoringState.apiCallCount
+  });
+});
+
+// ============================================================
 // HEALTH CHECK
 // ============================================================
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', version: '2.1.0', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', version: '2.2.0', timestamp: new Date().toISOString() });
 });
 
 // ============================================================
@@ -3010,10 +3365,73 @@ app.post('/messages/dm', async (req, res) => {
 });
 
 // ============================================================
+// TIMECARD ADJUSTMENTS EMAIL DIGEST
+// ============================================================
+
+// Cron endpoint: Generate and send weekly timecard digest
+// Schedule: Every Monday at 8:00 AM PT
+app.get('/cron/timecard-digest', async (req, res) => {
+  try {
+    console.log('📋 Generating timecard adjustments digest...');
+    const result = await generateDigest();
+    console.log('✅ Timecard digest sent successfully');
+    res.json(result);
+  } catch (error) {
+    console.error('❌ Timecard digest error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Test endpoint: Find the timecard adjustments conversation
+app.get('/test/timecard-conversation', async (req, res) => {
+  try {
+    const conversation = await findTimecardConversation();
+    res.json({
+      success: true,
+      conversation: {
+        id: conversation.id,
+        name: conversation.name,
+        userCount: conversation.users?.length || 0
+      }
+    });
+  } catch (error) {
+    console.error('Error finding timecard conversation:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Test endpoint: Get last week's messages (without sending email)
+app.get('/test/timecard-messages', async (req, res) => {
+  try {
+    const conversation = await findTimecardConversation();
+    const { messages, dateRange } = await getLastWeekMessages(conversation.id);
+    
+    res.json({
+      success: true,
+      conversationName: conversation.name,
+      conversationId: conversation.id,
+      messageCount: messages.length,
+      dateRange: {
+        start: dateRange.start.toISOString(),
+        end: dateRange.end.toISOString()
+      },
+      messages: messages.map(m => ({
+        author: m.user?.fullName || m.user?.firstName || 'Unknown',
+        text: m.text || m.body || '',
+        timestamp: m.createdAt || m.created
+      }))
+    });
+  } catch (error) {
+    console.error('Error fetching timecard messages:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================================
 // START
 // ============================================================
 
 app.listen(PORT, () => {
-  console.log(`Pixlcat Sling API v2.1.0 running on port ${PORT}`);
+  console.log(`Pixlcat Sling API v2.2.0 running on port ${PORT}`);
   startDailyScheduler();
 });
