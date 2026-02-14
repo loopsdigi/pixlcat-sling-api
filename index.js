@@ -2986,7 +2986,7 @@ app.post('/messages/dm', async (req, res) => {
           Authorization: SLING_TOKEN,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ text })
+        body: JSON.stringify({ content: text })
       }
     );
     
