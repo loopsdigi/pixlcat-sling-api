@@ -5,7 +5,7 @@
 // ============================================
 
 const SLING_TOKEN = process.env.SLING_TOKEN;
-const SLING_ORG_ID = process.env.SLING_ORG_ID;
+const SLING_ORG_ID = process.env.SLING_ORG_ID || '593037'; // Default org ID from index.js
 
 // Email configuration
 const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
