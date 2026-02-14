@@ -2914,7 +2914,15 @@ app.post('/messages/dm', async (req, res) => {
     // Find user by name or ID
     let targetUser;
     if (userId) {
-      targetUser = { id: userId };
+      // If userId provided, fetch the full user details
+      const userResp = await fetch(`https://pixlcat-sling-api.onrender.com/users`);
+      const userData = await userResp.json();
+      const usersList = userData.users || [];
+      targetUser = usersList.find(u => u.id === userId);
+      
+      if (!targetUser) {
+        return res.status(404).json({ error: `User ID ${userId} not found` });
+      }
     } else if (userName) {
       const usersResp = await fetch(`https://pixlcat-sling-api.onrender.com/users`);
       const usersData = await usersResp.json();
@@ -2938,16 +2946,34 @@ app.post('/messages/dm', async (req, res) => {
     const conversations = await convResp.json();
     
     // Find DM conversation with this user
-    // Look for conversations that include the target user
-    const dmConv = conversations.find(c => 
-      c.users && c.users.some(u => u.id === targetUser.id)
-    );
+    // Try multiple matching strategies since Sling conversation names vary
+    const firstName = targetUser.firstName;
+    const fullName = targetUser.fullName;
+    
+    const dmConv = conversations.find(c => {
+      const convName = c.name;
+      if (!convName) return false;
+      
+      // Strategy 1: Exact match on full name (e.g., "Jeffrey Kim")
+      if (convName === fullName) return true;
+      
+      // Strategy 2: Exact match on first name only (e.g., "Jeffrey")
+      if (convName === firstName) return true;
+      
+      // Strategy 3: Conversation contains the full name (case insensitive)
+      if (fullName && convName.toLowerCase().includes(fullName.toLowerCase())) return true;
+      
+      // Strategy 4: Conversation starts with first name (for "FirstName and You" format)
+      if (firstName && convName.toLowerCase().startsWith(firstName.toLowerCase())) return true;
+      
+      return false;
+    });
     
     if (!dmConv) {
       return res.status(404).json({ 
-        error: `No DM conversation found with ${targetUser.firstName || userName}. Please send them a message in Sling first to create the conversation.`,
+        error: `No DM conversation found with ${fullName || firstName}. Please send them a message in Sling first to create the conversation.`,
         userId: targetUser.id,
-        debug: `Checked ${conversations.length} conversations`
+        hint: `Looking for conversation with name matching "${firstName}" or "${fullName}"`
       });
     }
     
