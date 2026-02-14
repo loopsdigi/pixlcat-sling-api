@@ -81,10 +81,19 @@ async function getLastWeekMessages(conversationId) {
   
   const allMessages = await response.json();
   
+  console.log(`📥 Fetched ${allMessages.length} total messages from conversation`);
+  if (allMessages.length > 0) {
+    console.log('Sample message structure:', JSON.stringify(allMessages[0], null, 2));
+  }
+  
   // Filter messages from last week
   const lastWeekMessages = allMessages.filter(msg => {
     const msgDate = new Date(msg.createdAt || msg.created);
-    return msgDate >= lastMonday && msgDate <= lastSunday;
+    const inRange = msgDate >= lastMonday && msgDate <= lastSunday;
+    if (inRange) {
+      console.log(`✅ Message from ${msgDate.toISOString()} is in range`);
+    }
+    return inRange;
   });
   
   return {
