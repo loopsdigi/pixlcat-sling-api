@@ -2876,6 +2876,88 @@ app.get('/health', (req, res) => {
 });
 
 // ============================================================
+// MESSAGING: Send DM to Sling
+// ============================================================
+
+app.post('/messages/dm', async (req, res) => {
+  try {
+    const { userId, userName, text } = req.body;
+    
+    if (!text) {
+      return res.status(400).json({ error: 'Message text is required' });
+    }
+    
+    // Find user by name or ID
+    let targetUser;
+    if (userId) {
+      targetUser = { id: userId };
+    } else if (userName) {
+      const usersResp = await fetch(`${SLING_BASE}/v1/users`, {
+        headers: { Authorization: SLING_TOKEN }
+      });
+      const usersData = await usersResp.json();
+      targetUser = usersData.find(u => 
+        u.firstName?.toLowerCase().includes(userName.toLowerCase()) ||
+        u.fullName?.toLowerCase().includes(userName.toLowerCase())
+      );
+      
+      if (!targetUser) {
+        return res.status(404).json({ error: `User "${userName}" not found` });
+      }
+    } else {
+      return res.status(400).json({ error: 'userId or userName required' });
+    }
+    
+    // Get existing conversations
+    const convResp = await fetch(`${SLING_BASE}/v1/593037/conversations`, {
+      headers: { Authorization: SLING_TOKEN }
+    });
+    const conversations = await convResp.json();
+    
+    // Find DM conversation with this user
+    const dmConv = conversations.find(c => 
+      c.users?.some(u => u.id === targetUser.id)
+    );
+    
+    if (!dmConv) {
+      return res.status(404).json({ 
+        error: 'No existing DM conversation found. Please message this user in Sling first.' 
+      });
+    }
+    
+    // Send message
+    const msgResp = await fetch(
+      `${SLING_BASE}/v1/593037/conversations/${dmConv.id}/messages`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: SLING_TOKEN,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ text })
+      }
+    );
+    
+    if (!msgResp.ok) {
+      const errText = await msgResp.text();
+      throw new Error(`Sling API error: ${msgResp.status} - ${errText}`);
+    }
+    
+    const result = await msgResp.json();
+    res.json({ 
+      success: true, 
+      recipient: targetUser.firstName || targetUser.fullName,
+      conversationId: dmConv.id,
+      result 
+    });
+    
+  } catch (error) {
+    console.error('❌ /messages/dm error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================================
 // START
 // ============================================================
 
