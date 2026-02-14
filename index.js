@@ -38,6 +38,9 @@ const SLING_TOKEN = process.env.SLING_TOKEN;
 const API_KEY = process.env.API_KEY;
 const SLACK_SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET;
 
+// Event deduplication tracking
+const processedEvents = new Set();
+
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
   .split(',')
   .map((s) => s.trim())
@@ -2604,10 +2607,25 @@ app.post('/slack/events', async (req, res) => {
 
   if (req.body.type === 'url_verification') return res.json({ challenge: req.body.challenge });
 
+  // CRITICAL: Respond 200 immediately to prevent Slack retries
   res.status(200).send('ok');
 
   const event = req.body.event;
   if (!event || event.type !== 'message' || event.bot_id || event.subtype) return;
+
+  // Event deduplication - prevent processing the same event multiple times
+  const eventId = req.body.event_id || `${event.channel}-${event.ts}`;
+  if (processedEvents.has(eventId)) {
+    console.log(`[events] Skipping duplicate event: ${eventId}`);
+    return;
+  }
+  processedEvents.add(eventId);
+  
+  // Trim old events to prevent memory leak (keep last 1000)
+  if (processedEvents.size > 1000) {
+    const toDelete = Array.from(processedEvents).slice(0, processedEvents.size - 1000);
+    toDelete.forEach(id => processedEvents.delete(id));
+  }
 
   // Route ops channel messages to Claude analytics
   if (event.channel === OPS_CHANNEL) {
