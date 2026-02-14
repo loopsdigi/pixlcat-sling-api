@@ -2913,31 +2913,16 @@ app.post('/messages/dm', async (req, res) => {
     });
     const conversations = await convResp.json();
     
-    // Find DM conversation with this user
-    let dmConv = conversations.find(c => 
-      c.users?.some(u => u.id === targetUser.id)
+    // Find DM conversation with this user (look for 1-on-1 conversations)
+    const dmConv = conversations.find(c => 
+      c.type === 'direct' && c.users?.some(u => u.id === targetUser.id)
     );
     
-    // If no conversation exists, create one
     if (!dmConv) {
-      console.log(`Creating new DM conversation with user ${targetUser.id}`);
-      const createResp = await fetch(`${SLING_BASE}/v1/593037/conversations`, {
-        method: 'POST',
-        headers: {
-          Authorization: SLING_TOKEN,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          members: [targetUser.id]
-        })
+      return res.status(404).json({ 
+        error: `No DM conversation found with ${targetUser.firstName || userName}. Please send them a message in Sling first to create the conversation.`,
+        userId: targetUser.id
       });
-      
-      if (createResp.ok) {
-        dmConv = await createResp.json();
-      } else {
-        const errText = await createResp.text();
-        throw new Error(`Could not create conversation: ${createResp.status} - ${errText}`);
-      }
     }
     
     // Send message
