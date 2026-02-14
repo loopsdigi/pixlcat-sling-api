@@ -2892,11 +2892,10 @@ app.post('/messages/dm', async (req, res) => {
     if (userId) {
       targetUser = { id: userId };
     } else if (userName) {
-      const usersResp = await fetch(`${SLING_BASE}/v1/users`, {
-        headers: { Authorization: SLING_TOKEN }
-      });
+      const usersResp = await fetch(`https://pixlcat-sling-api.onrender.com/users`);
       const usersData = await usersResp.json();
-      targetUser = usersData.find(u => 
+      const usersList = usersData.users || [];
+      targetUser = usersList.find(u => 
         u.firstName?.toLowerCase().includes(userName.toLowerCase()) ||
         u.fullName?.toLowerCase().includes(userName.toLowerCase())
       );
