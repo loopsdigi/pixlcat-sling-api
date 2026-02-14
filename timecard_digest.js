@@ -88,7 +88,7 @@ async function getLastWeekMessages(conversationId) {
   
   // Filter messages from last week
   const lastWeekMessages = allMessages.filter(msg => {
-    const msgDate = new Date(msg.createdAt || msg.created);
+    const msgDate = new Date(msg.timestamp || msg.createdAt || msg.created);
     const inRange = msgDate >= lastMonday && msgDate <= lastSunday;
     if (inRange) {
       console.log(`✅ Message from ${msgDate.toISOString()} is in range`);
@@ -153,7 +153,7 @@ function formatEmailHTML(messages, dateRange) {
     const byEmployee = {};
     
     messages.forEach(msg => {
-      const author = msg.user?.fullName || msg.user?.firstName || 'Unknown';
+      const author = msg.author?.name || msg.user?.fullName || msg.user?.firstName || 'Unknown';
       if (!byEmployee[author]) {
         byEmployee[author] = [];
       }
@@ -172,17 +172,17 @@ function formatEmailHTML(messages, dateRange) {
     
     // Display messages chronologically
     messages
-      .sort((a, b) => new Date(a.createdAt || a.created) - new Date(b.createdAt || b.created))
+      .sort((a, b) => new Date(a.timestamp || a.createdAt || a.created) - new Date(b.timestamp || b.createdAt || b.created))
       .forEach(msg => {
-        const author = msg.user?.fullName || msg.user?.firstName || 'Unknown';
-        const timestamp = new Date(msg.createdAt || msg.created).toLocaleString('en-US', {
+        const author = msg.author?.name || msg.user?.fullName || msg.user?.firstName || 'Unknown';
+        const timestamp = new Date(msg.timestamp || msg.createdAt || msg.created).toLocaleString('en-US', {
           month: 'short',
           day: 'numeric',
           hour: 'numeric',
           minute: '2-digit',
           hour12: true
         });
-        const text = msg.text || msg.body || '';
+        const text = msg.content || msg.text || msg.body || '';
         
         html += `
   <div class="message">
