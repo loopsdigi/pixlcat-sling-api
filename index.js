@@ -2928,7 +2928,7 @@ app.post('/messages/dm', async (req, res) => {
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          users: [targetUser.id]
+          members: [targetUser.id]
         })
       });
       
